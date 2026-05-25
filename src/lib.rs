@@ -302,6 +302,7 @@ async fn render_stream(
     let mut spinner_active = false;
     let mut first_token = true;
     let mut produced = false;
+    let mut line_open = false;
     let mut usage: Option<Usage> = None;
     let mut plan_tasks: Vec<String> = vec![];
     let mut plan_done: Vec<bool> = vec![];
@@ -326,13 +327,29 @@ async fn render_stream(
                         first_token = false;
                     }
                     produced = true;
+                    line_open = true;
                     print!("{text}");
                     let _ = io::stdout().flush();
                 }
                 Some(StreamEvent::Usage(value)) => usage = Some(value),
+                Some(StreamEvent::ToolCall { summary }) => {
+                    clear_spinner(spinner, spinner_active);
+                    spinner_active = false;
+                    if line_open {
+                        println!();
+                        line_open = false;
+                    }
+                    print_tool_call(&summary, spinner);
+                    first_token = true;
+                    frame = 0;
+                }
                 Some(StreamEvent::Confirm { preview, reply }) => {
                     clear_spinner(spinner, spinner_active);
                     spinner_active = false;
+                    if line_open {
+                        println!();
+                        line_open = false;
+                    }
                     let decision = tokio::task::block_in_place(|| {
                         show_confirm_preview(&preview, spinner);
                         prompt_confirm_decision(spinner)
@@ -345,6 +362,10 @@ async fn render_stream(
                 Some(StreamEvent::FileOp { verb, path, added, removed, preview, truncated }) => {
                     clear_spinner(spinner, spinner_active);
                     spinner_active = false;
+                    if line_open {
+                        println!();
+                        line_open = false;
+                    }
                     print_file_op(&verb, &path, added, removed, &preview, truncated, spinner);
                     // Re-arm the spinner for the next API round.
                     first_token = true;
@@ -353,6 +374,10 @@ async fn render_stream(
                 Some(StreamEvent::PlanSet { tasks }) => {
                     clear_spinner(spinner, spinner_active);
                     spinner_active = false;
+                    if line_open {
+                        println!();
+                        line_open = false;
+                    }
                     plan_done = vec![false; tasks.len()];
                     plan_tasks = tasks;
                     print_plan_list(&plan_tasks, &plan_done, spinner);
@@ -362,6 +387,10 @@ async fn render_stream(
                 Some(StreamEvent::PlanTaskDone { index }) => {
                     clear_spinner(spinner, spinner_active);
                     spinner_active = false;
+                    if line_open {
+                        println!();
+                        line_open = false;
+                    }
                     if index < plan_done.len() {
                         plan_done[index] = true;
                     }
@@ -398,7 +427,7 @@ async fn render_stream(
         }
     }
 
-    if produced {
+    if produced && line_open {
         println!();
     } else {
         clear_spinner(spinner, spinner_active);
@@ -423,6 +452,14 @@ async fn render_stream(
                 usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
             );
         }
+    }
+}
+
+fn print_tool_call(summary: &str, is_tty: bool) {
+    if is_tty {
+        eprintln!("\x1b[90m  └─ {summary}\x1b[0m");
+    } else {
+        eprintln!("tool: {summary}");
     }
 }
 

@@ -24,7 +24,9 @@ const MAX_COMMAND_TIMEOUT_SECS: u64 = 300;
 pub fn guidance(include_write: bool) -> String {
     let mut text = String::from(
         "You can use Anveesa tools to inspect the workspace: list directories, find files by name, \
-search text, read capped file snippets, and do a basic public web lookup. Prefer tools over guessing.",
+search text, read capped file snippets, and do a basic public web lookup. Prefer tools over guessing. \
+If you need to inspect, read, list, search, or check something, call the relevant tool immediately; \
+do not end a response by saying you will inspect something later.",
     );
     if include_write {
         text.push_str(
@@ -58,11 +60,34 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     let field = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("");
     match name {
+        "list_dir" => format!("list directory {}", field("path").if_empty(".")),
+        "find_files" => format!(
+            "find files matching `{}` under {}",
+            field("query"),
+            field("root").if_empty(".")
+        ),
+        "search_text" => format!(
+            "search text `{}` under {}",
+            field("query"),
+            field("root").if_empty(".")
+        ),
+        "read_file" => format!("read file {}", field("path")),
+        "web_search" => format!("web search `{}`", field("query")),
         "create_dir" => format!("create directory {}", field("path")),
         "write_file" => format!("write file {}", field("path")),
         "edit_file" => format!("edit file {}", field("path")),
         "run_command" => format!("run command `{}`", field("command")),
         _ => format!("{name} {}", truncate(arguments, 80)),
+    }
+}
+
+trait EmptyStrExt {
+    fn if_empty(self, fallback: &'static str) -> Self;
+}
+
+impl<'a> EmptyStrExt for &'a str {
+    fn if_empty(self, fallback: &'static str) -> Self {
+        if self.is_empty() { fallback } else { self }
     }
 }
 
@@ -846,6 +871,23 @@ mod tests {
 
     #[test]
     fn describes_calls_for_confirmation() {
+        assert_eq!(describe_call("list_dir", r#"{}"#), "list directory .");
+        assert_eq!(
+            describe_call("find_files", r#"{"query":"Cargo","root":"src"}"#),
+            "find files matching `Cargo` under src"
+        );
+        assert_eq!(
+            describe_call("search_text", r#"{"query":"TODO"}"#),
+            "search text `TODO` under ."
+        );
+        assert_eq!(
+            describe_call("read_file", r#"{"path":"README.md"}"#),
+            "read file README.md"
+        );
+        assert_eq!(
+            describe_call("web_search", r#"{"query":"rust termios"}"#),
+            "web search `rust termios`"
+        );
         assert_eq!(
             describe_call("create_dir", r#"{"path":"hello"}"#),
             "create directory hello"
@@ -863,6 +905,7 @@ mod tests {
     #[test]
     fn guidance_mentions_writes_only_when_enabled() {
         assert!(!guidance(false).contains("write_file"));
+        assert!(guidance(false).contains("call the relevant tool immediately"));
         assert!(guidance(true).contains("create_dir"));
         assert!(guidance(true).contains("write_file"));
     }

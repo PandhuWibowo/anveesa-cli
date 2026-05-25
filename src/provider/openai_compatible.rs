@@ -21,6 +21,7 @@ const MAX_RETRIES: usize = 2;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How many times the model may call the exact same (tool, arguments) pair before we refuse.
 const MAX_IDENTICAL_CALLS: usize = 3;
+const MAX_TOOL_INTENT_REPROMPTS: usize = 2;
 
 pub async fn ask(
     provider_name: &str,
@@ -58,6 +59,7 @@ pub async fn ask(
     let mut approval_state = ToolApprovalState::default();
     let mut full_text = String::new();
     let mut last_usage: Option<Usage> = None;
+    let mut tool_intent_reprompts = 0usize;
 
     loop {
         let mut body = json!({
@@ -94,12 +96,25 @@ pub async fn ask(
         let mut state = StreamState::default();
         stream_response(response, &mut state, events).await?;
 
-        full_text.push_str(&state.content);
         if let Some(usage) = state.usage {
             last_usage = Some(usage);
         }
 
         if state.tool_calls.is_empty() {
+            if tools_enabled
+                && tool_intent_reprompts < MAX_TOOL_INTENT_REPROMPTS
+                && looks_like_unfinished_tool_intent(&state.content)
+            {
+                tool_intent_reprompts += 1;
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": state.content,
+                }));
+                messages.push(tool_intent_reprompt_message());
+                continue;
+            }
+
+            full_text.push_str(&state.content);
             break;
         }
 
@@ -196,6 +211,10 @@ async fn dispatch_tool(
         if !policy.allows_write_tools() {
             return denied_message("write tools are disabled (pass --yes or run interactively)");
         }
+    } else {
+        let _ = events.send(StreamEvent::ToolCall {
+            summary: tools::describe_call(&call.name, &call.arguments),
+        });
     }
 
     // Snapshot BEFORE the tool runs — needed both for preview and for post-run diff.
@@ -395,6 +414,50 @@ fn tool_limit_message(max_tool_rounds: usize) -> Value {
             "Anveesa has already run {max_tool_rounds} tool rounds for this answer. Do not call tools again. Use the tool results already provided to produce the best final answer. If the requested work is not complete, say exactly what remains."
         )
     })
+}
+
+fn tool_intent_reprompt_message() -> Value {
+    json!({
+        "role": "system",
+        "content": "Your previous message said you would inspect/read/check the workspace, but it did not call any tool or provide a final answer. Do not narrate future tool use. If you need information, call the relevant Anveesa tools now. Otherwise, answer the user directly."
+    })
+}
+
+fn looks_like_unfinished_tool_intent(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() || lower.len() > 600 {
+        return false;
+    }
+
+    let has_intent = [
+        "let me inspect",
+        "let me check",
+        "let me look",
+        "let me read",
+        "let me search",
+        "let me peek",
+        "let me also peek",
+        "i'll inspect",
+        "i'll check",
+        "i'll look",
+        "i'll read",
+        "i'll search",
+        "i will inspect",
+        "i will check",
+        "i will look",
+        "i will read",
+        "i will search",
+        "i'm going to inspect",
+        "i'm going to check",
+        "i'm going to look",
+        "i'm going to read",
+        "i need to inspect",
+        "i need to check",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    has_intent && (lower.ends_with(':') || lower.ends_with('.') || lower.ends_with("first"))
 }
 
 fn denied_message(reason: &str) -> String {
@@ -685,15 +748,14 @@ async fn stream_response(
                 // Stream ended normally
                 break;
             }
-            Err(_e) => {
+            Err(error) => {
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    // Log the error but don't fail the whole request
-                    eprintln!(
-                        "\n[warning: stream interrupted after {} consecutive errors]",
-                        consecutive_errors
+                    bail!(
+                        "stream interrupted while reading provider response after {} consecutive errors: {}",
+                        consecutive_errors,
+                        error
                     );
-                    break;
                 }
                 // Try to continue reading - transient network hiccups happen
                 continue;
@@ -971,5 +1033,19 @@ mod tests {
                 .unwrap()
                 .contains("Do not call tools again")
         );
+    }
+
+    #[test]
+    fn detects_unfinished_tool_intent() {
+        assert!(looks_like_unfinished_tool_intent(
+            "Let me inspect the workspace structure more thoroughly."
+        ));
+        assert!(looks_like_unfinished_tool_intent(
+            "Let me also peek at the key files to understand the project:"
+        ));
+        assert!(!looks_like_unfinished_tool_intent(
+            "The project is a Rust CLI with an npm wrapper."
+        ));
+        assert!(!looks_like_unfinished_tool_intent(""));
     }
 }

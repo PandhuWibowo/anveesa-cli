@@ -116,6 +116,8 @@ pub enum StreamEvent {
     Token(String),
     /// Final token accounting for the turn.
     Usage(Usage),
+    /// A read-only tool is running. Used to make multi-round inspection visible.
+    ToolCall { summary: String },
     /// A write/run tool needs the user's approval. The renderer shows the
     /// preview, prompts for a decision, and sends it back through the reply channel.
     Confirm {

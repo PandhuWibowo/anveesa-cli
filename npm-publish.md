@@ -21,15 +21,15 @@ npm run build
 ## Publish to npm
 
 The npm installer downloads prebuilt binaries from the GitHub release that
-matches `package.json` exactly. For `0.2.3`, the release tag must be `v0.2.3`
+matches `package.json` exactly. For `0.2.4`, the release tag must be `v0.2.4`
 and must contain assets named like:
 
 ```text
-anveesa-0.2.3-aarch64-apple-darwin.tar.gz
-anveesa-0.2.3-x86_64-apple-darwin.tar.gz
-anveesa-0.2.3-x86_64-unknown-linux-gnu.tar.gz
-anveesa-0.2.3-aarch64-unknown-linux-gnu.tar.gz
-anveesa-0.2.3-x86_64-pc-windows-msvc.tar.gz
+anveesa-0.2.4-aarch64-apple-darwin.tar.gz
+anveesa-0.2.4-x86_64-apple-darwin.tar.gz
+anveesa-0.2.4-x86_64-unknown-linux-gnu.tar.gz
+anveesa-0.2.4-aarch64-unknown-linux-gnu.tar.gz
+anveesa-0.2.4-x86_64-pc-windows-msvc.tar.gz
 ```
 
 ```bash
