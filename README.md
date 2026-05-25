@@ -3,6 +3,27 @@
 Anveesa is a Rust terminal wrapper for AI providers. It gives you one command,
 `anveesa`, while each provider is configured as either:
 
+## 📦 Publishing to npm
+
+Anveesa can be published as an npm package via a Node.js wrapper that invokes the Rust binary.
+
+### Install from npm
+
+```bash
+npm install -g anveesa
+```
+
+### Build and publish
+
+```bash
+git tag v$(node -p "require('./package.json').version")
+git push origin main --tags
+npm publish
+```
+
+Wait for the GitHub release binary workflow to finish before publishing to npm.
+See `npm-publish.md` for the full release checklist.
+
 - `openai-compatible`: HTTP chat completions providers such as OpenRouter and other compatible gateways.
 - `command`: local CLIs such as Codex, Copilot, and Claude Code, where Anveesa spawns a command and passes the prompt.
 
@@ -148,6 +169,28 @@ OpenAI-compatible API providers:
 
 - `openai`
 - `sumopod`
+
+### How to change the model
+
+You can change the model using these commands:
+
+**Via config file:**
+```bash
+anveesa config set-model "your-model"
+```
+
+**Via command line:**
+```bash
+anveesa --model "your-model" "your prompt"
+```
+
+**Interactive mode:**
+```bash
+anveesa
+# Then select/change model in the prompt
+```
+
+The model can be set per provider (e.g., `sumopod`, `openai`, `openrouter`, etc.) and can be overridden per command with `--model`.
 - `openrouter`
 - `glm`
 - `glm-coding`

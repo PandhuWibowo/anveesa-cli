@@ -46,6 +46,7 @@ pub async fn ask(
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(Duration::from_secs(300)) // 5-minute read timeout for long streams
         .build()
         .context("failed to build HTTP client")?;
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
@@ -662,22 +663,42 @@ async fn stream_response(
     events: &UnboundedSender<StreamEvent>,
 ) -> Result<()> {
     let mut buffer = String::new();
+    let mut consecutive_errors: usize = 0;
+    const MAX_CONSECUTIVE_ERRORS: usize = 3;
 
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .context("failed to read streamed response chunk")?
-    {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+    loop {
+        let chunk_result = response.chunk().await;
+        
+        match chunk_result {
+            Ok(Some(chunk)) => {
+                consecutive_errors = 0; // Reset error counter on successful read
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        while let Some(newline) = buffer.find('\n') {
-            let line: String = buffer.drain(..=newline).collect();
-            if let Some(token) = state.ingest_line(line.trim_end_matches(['\r', '\n'])) {
-                let _ = events.send(StreamEvent::Token(token));
+                while let Some(newline) = buffer.find('\n') {
+                    let line: String = buffer.drain(..=newline).collect();
+                    if let Some(token) = state.ingest_line(line.trim_end_matches(['\r', '\n'])) {
+                        let _ = events.send(StreamEvent::Token(token));
+                    }
+                }
+            }
+            Ok(None) => {
+                // Stream ended normally
+                break;
+            }
+            Err(_e) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    // Log the error but don't fail the whole request
+                    eprintln!("\n[warning: stream interrupted after {} consecutive errors]", consecutive_errors);
+                    break;
+                }
+                // Try to continue reading - transient network hiccups happen
+                continue;
             }
         }
     }
 
+    // Process any remaining data in the buffer
     if !buffer.is_empty()
         && let Some(token) = state.ingest_line(buffer.trim())
     {
@@ -716,7 +737,10 @@ impl StreamState {
             self.done = true;
             return None;
         }
-        let chunk: Value = serde_json::from_str(data).ok()?;
+        let chunk: Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => return None, // Skip malformed lines instead of bailing
+        };
         self.apply_chunk(&chunk)
     }
 
@@ -725,7 +749,15 @@ impl StreamState {
             self.usage = parse_usage(usage);
         }
 
-        let delta = chunk.get("choices")?.get(0)?.get("delta")?;
+        let Some(choices) = chunk.get("choices") else {
+            return None;
+        };
+        let Some(first_choice) = choices.get(0) else {
+            return None;
+        };
+        let Some(delta) = first_choice.get("delta") else {
+            return None;
+        };
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in tool_calls {
@@ -733,7 +765,8 @@ impl StreamState {
             }
         }
 
-        let text = delta.get("content").and_then(Value::as_str)?;
+        // Content may be absent (e.g., tool-call-only chunks) — don't bail.
+        let text = delta.get("content").and_then(Value::as_str).unwrap_or("");
         if text.is_empty() {
             return None;
         }
