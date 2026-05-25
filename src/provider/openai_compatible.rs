@@ -22,6 +22,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How many times the model may call the exact same (tool, arguments) pair before we refuse.
 const MAX_IDENTICAL_CALLS: usize = 3;
 const MAX_TOOL_INTENT_REPROMPTS: usize = 2;
+/// How many times we ask the model to continue after its output was cut off by the
+/// provider's token limit (`finish_reason == "length"`) before giving up.
+const MAX_LENGTH_CONTINUATIONS: usize = 8;
 
 pub async fn ask(
     provider_name: &str,
@@ -60,6 +63,7 @@ pub async fn ask(
     let mut full_text = String::new();
     let mut last_usage: Option<Usage> = None;
     let mut tool_intent_reprompts = 0usize;
+    let mut length_continuations = 0usize;
 
     loop {
         let _ = events.send(StreamEvent::Status {
@@ -77,6 +81,9 @@ pub async fn ask(
         });
         if usage_requested {
             body["stream_options"] = json!({ "include_usage": true });
+        }
+        if let Some(max_tokens) = config.max_tokens {
+            body["max_tokens"] = json!(max_tokens);
         }
         if tools_enabled {
             body["tools"] = json!(tools::definitions(policy.allows_write_tools()));
@@ -106,6 +113,31 @@ pub async fn ask(
 
         if let Some(usage) = state.usage {
             last_usage = Some(usage);
+        }
+
+        // The provider cut the response off at its output-token limit. Treating the
+        // partial text (or partial tool call) as final is what makes Anveesa appear to
+        // "stop suddenly" mid-task — instead, keep what we have and ask it to continue.
+        if state.finish_reason.as_deref() == Some("length")
+            && length_continuations < MAX_LENGTH_CONTINUATIONS
+        {
+            length_continuations += 1;
+            full_text.push_str(&state.content);
+            let _ = events.send(StreamEvent::Status {
+                message: "Response hit the output token limit; asking the model to continue"
+                    .to_string(),
+            });
+            // Drop any partial tool call: a length-truncated call has incomplete
+            // arguments and can't be dispatched. The continuation nudge tells the
+            // model to re-issue it.
+            if !state.content.is_empty() {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": state.content,
+                }));
+            }
+            messages.push(length_continuation_message());
+            continue;
         }
 
         if state.tool_calls.is_empty() {
@@ -454,6 +486,13 @@ fn tool_limit_message(max_tool_rounds: usize) -> Value {
         "content": format!(
             "Anveesa has already run {max_tool_rounds} tool rounds for this answer. Do not call tools again. Use the tool results already provided to produce the best final answer. If the requested work is not complete, say exactly what remains."
         )
+    })
+}
+
+fn length_continuation_message() -> Value {
+    json!({
+        "role": "system",
+        "content": "Your previous response was cut off because it reached the output token limit. Continue from exactly where you left off. Do not repeat text you already produced and do not restart the answer. If you were in the middle of a tool call, re-issue that complete tool call now."
     })
 }
 
@@ -819,6 +858,7 @@ struct StreamState {
     content: String,
     tool_calls: Vec<PartialToolCall>,
     usage: Option<Usage>,
+    finish_reason: Option<String>,
     done: bool,
 }
 
@@ -861,6 +901,13 @@ impl StreamState {
         let Some(first_choice) = choices.get(0) else {
             return None;
         };
+
+        // `finish_reason` is a sibling of `delta` and only carries a string on the
+        // final chunk for the choice (it's null on every intermediate chunk).
+        if let Some(reason) = first_choice.get("finish_reason").and_then(Value::as_str) {
+            self.finish_reason = Some(reason.to_string());
+        }
+
         let Some(delta) = first_choice.get("delta") else {
             return None;
         };
@@ -1014,6 +1061,31 @@ mod tests {
         assert_eq!(state.tool_calls[0].id, "call_1");
         assert_eq!(state.tool_calls[0].name, "read_file");
         assert_eq!(state.tool_calls[0].arguments, "{\"path\":\"x\"}");
+    }
+
+    #[test]
+    fn captures_finish_reason_from_final_chunk() {
+        let mut state = StreamState::default();
+        // Intermediate chunk: finish_reason is null and must not be recorded.
+        state.apply_chunk(&json!({
+            "choices": [{ "delta": { "content": "partial" }, "finish_reason": null }]
+        }));
+        assert_eq!(state.finish_reason, None);
+        // Final chunk reports truncation.
+        state.apply_chunk(&json!({
+            "choices": [{ "delta": {}, "finish_reason": "length" }]
+        }));
+        assert_eq!(state.finish_reason.as_deref(), Some("length"));
+        assert_eq!(state.content, "partial");
+    }
+
+    #[test]
+    fn length_continuation_message_asks_to_resume_without_repeating() {
+        let message = length_continuation_message();
+        assert_eq!(message["role"], json!("system"));
+        let content = message["content"].as_str().unwrap();
+        assert!(content.contains("cut off"));
+        assert!(content.contains("Do not repeat"));
     }
 
     #[test]

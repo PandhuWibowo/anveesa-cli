@@ -22,6 +22,9 @@ kind = "openai-compatible"
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 # default_model = "openai/gpt-4.1-mini"
+# Raise the per-response output cap to reduce truncation on long answers.
+# Anveesa continues truncated answers automatically either way.
+# max_tokens = 8192
 
 [providers.sumopod]
 kind = "openai-compatible"
@@ -436,6 +439,12 @@ pub struct OpenAiCompatibleProviderConfig {
     /// For Anthropic models this also sends the `anthropic-beta: prompt-caching-2024-07-31` header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache: Option<bool>,
+
+    /// Upper bound on tokens the model may generate per response. When unset the
+    /// provider default applies. Raising this reduces how often long answers are
+    /// truncated by the output limit (Anveesa continues truncated answers either way).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,6 +481,7 @@ fn insert_openai_provider(
             default_model: None,
             headers: BTreeMap::new(),
             prompt_cache: None,
+            max_tokens: None,
         }),
     );
 }
