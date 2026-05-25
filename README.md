@@ -63,6 +63,26 @@ sessions (stored next to the config as `history`). The active conversation is
 stored next to it as `session.json`. Use the up/down arrows to recall previous
 prompts.
 
+To include an image, copy it to the clipboard and run `/attach` before your
+question:
+
+```text
+❯ /attach
+  [image attached for the next message]
+❯ what is in this screenshot?
+```
+
+You can also attach an image file directly:
+
+```text
+❯ /attach ./screenshot.png
+❯ explain this UI
+```
+
+Image input works with OpenAI-compatible providers and models that support
+vision. Terminals do not paste image pixels into the text prompt itself, so use
+`/attach` instead of pressing paste and expecting the image to appear inline.
+
 `ctx:on` means Anveesa sends lightweight terminal context with each request:
 current directory, parent directory, git root/branch/status when available, and
 a capped directory listing. This lets the model answer questions like "where are

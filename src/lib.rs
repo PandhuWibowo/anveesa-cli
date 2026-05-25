@@ -12,12 +12,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use clap::{CommandFactory, Parser};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-
-#[cfg(target_os = "macos")]
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 use crate::{
     cli::{AskOptions, Cli, Command, ConfigCommand},
@@ -80,6 +78,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         .get(&provider_name)
         .with_context(|| format!("unknown provider '{provider_name}'"))?;
     let tools_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
+    let images_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
     let model = options
         .model
         .clone()
@@ -122,6 +121,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
     // Fingerprint of the last clipboard image we attached — prevents re-attaching
     // the same screenshot on every subsequent turn until the user copies something new.
     let mut last_image_fp: Option<String> = None;
+    let mut pending_image: Option<ImageAttachment> = None;
     let mut paste_count = 0usize;
 
     loop {
@@ -148,6 +148,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             "/clear" => {
                 history.clear();
                 last_image_fp = None;
+                pending_image = None;
                 paste_count = 0;
                 if let Some(path) = &session_path {
                     let _ = fs::remove_file(path);
@@ -157,12 +158,31 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             }
             _ => {}
         }
+        if let Some(path) = parse_attach_command(&prompt) {
+            if !images_available {
+                eprintln!("error: image attachments require an openai-compatible provider");
+                continue;
+            }
+
+            match attach_image(path.as_deref()) {
+                Ok(image) => {
+                    last_image_fp = Some(image_fingerprint(&image));
+                    pending_image = Some(image);
+                    eprintln!("\x1b[90m  [image attached for the next message]\x1b[0m");
+                }
+                Err(error) => eprintln!("error: {error:#}"),
+            }
+            continue;
+        }
         if let Some(path) = &history_path {
             let _ = append_repl_history(path, prompt.as_str());
         }
 
-        // Check clipboard for a new screenshot. Skip if it's the same image as last turn.
-        let image = if is_tty {
+        // Use an explicitly attached image first. Otherwise, keep the legacy
+        // convenience behavior: attach a newly copied clipboard image once.
+        let image = if pending_image.is_some() {
+            pending_image.take()
+        } else if is_tty && images_available {
             grab_clipboard_image().and_then(|img| {
                 let fp = image_fingerprint(&img);
                 if last_image_fp.as_deref() == Some(&fp) {
@@ -309,7 +329,7 @@ async fn render_stream(
 
     static TIPS: &[&str] = &[
         "Tip: type /clear to reset context",
-        "Tip: paste a screenshot and ask about it",
+        "Tip: copy an image, then type /attach",
         "Tip: use --yes to auto-approve file edits",
         "Tip: type /exit to leave the session",
     ];
@@ -918,6 +938,7 @@ fn print_session_header(
     row("", "", "  Commands", bg);
     row(&info, dm, "  /clear   reset memory", cy);
     row(&cwd_line, dm, "  /exit    quit session", cy);
+    row("", "", "  /attach  attach image", cy);
     row("", "", approve, cy);
     row("", "", "", "");
 
@@ -1274,17 +1295,138 @@ fn image_fingerprint(img: &ImageAttachment) -> String {
     format!("{}:{}", img.data.len(), prefix)
 }
 
+fn parse_attach_command(prompt: &str) -> Option<Option<String>> {
+    for command in ["/attach", "/image", "/img"] {
+        if prompt == command {
+            return Some(None);
+        }
+        if let Some(rest) = prompt.strip_prefix(command)
+            && rest.chars().next().is_some_and(char::is_whitespace)
+        {
+            let path = unquote_path(rest.trim());
+            if !path.is_empty() {
+                return Some(Some(path.to_string()));
+            }
+            return Some(None);
+        }
+    }
+    None
+}
+
+fn unquote_path(path: &str) -> &str {
+    let trimmed = path.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        if (bytes[0] == b'"' && bytes[trimmed.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[trimmed.len() - 1] == b'\'')
+        {
+            return &trimmed[1..trimmed.len() - 1];
+        }
+    }
+    trimmed
+}
+
+fn attach_image(path: Option<&str>) -> Result<ImageAttachment> {
+    match path {
+        Some(path) => load_image_file(Path::new(path)),
+        None => read_clipboard_image().context(
+            "no supported image found in clipboard; copy an image first or use /attach path/to/image.png",
+        ),
+    }
+}
+
+fn load_image_file(path: &Path) -> Result<ImageAttachment> {
+    const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{} is not a file", path.display());
+    }
+    if metadata.len() > MAX_IMAGE_BYTES {
+        bail!(
+            "{} is too large for an image attachment ({} MB max)",
+            path.display(),
+            MAX_IMAGE_BYTES / 1024 / 1024
+        );
+    }
+
+    let mime = image_mime_for_path(path)
+        .with_context(|| format!("unsupported image type for {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if bytes.is_empty() {
+        bail!("{} is empty", path.display());
+    }
+
+    Ok(ImageAttachment {
+        mime: mime.to_string(),
+        data: BASE64.encode(&bytes),
+    })
+}
+
+fn image_mime_for_path(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        _ => None,
+    }
+}
+
 /// Try to grab an image from the system clipboard and return it base64-encoded.
 /// Only supported on macOS; returns None on other platforms or when no image is present.
 #[cfg(target_os = "macos")]
 fn grab_clipboard_image() -> Option<ImageAttachment> {
-    let tmp = format!("/tmp/anveesa_clip_{}.png", std::process::id());
+    read_clipboard_image().ok()
+}
 
-    // AppleScript: cast clipboard to PNG and write to a temp file.
+/// Try to grab an image from the system clipboard and return it base64-encoded.
+#[cfg(target_os = "macos")]
+fn read_clipboard_image() -> Result<ImageAttachment> {
+    if let Ok(bytes) = read_clipboard_class_bytes("PNGf", "png") {
+        return Ok(ImageAttachment {
+            mime: "image/png".to_string(),
+            data: BASE64.encode(&bytes),
+        });
+    }
+
+    if let Ok(bytes) = read_clipboard_class_bytes("JPEG", "jpg") {
+        return Ok(ImageAttachment {
+            mime: "image/jpeg".to_string(),
+            data: BASE64.encode(&bytes),
+        });
+    }
+
+    if let Ok(tiff) = read_clipboard_class_bytes("TIFF", "tiff") {
+        let png = convert_tiff_to_png(&tiff)?;
+        return Ok(ImageAttachment {
+            mime: "image/png".to_string(),
+            data: BASE64.encode(&png),
+        });
+    }
+
+    bail!("clipboard does not contain PNG, JPEG, or TIFF image data")
+}
+
+#[cfg(target_os = "macos")]
+fn read_clipboard_class_bytes(class_code: &str, extension: &str) -> Result<Vec<u8>> {
+    let tmp = std::env::temp_dir().join(format!(
+        "anveesa_clip_{}_{}.{}",
+        std::process::id(),
+        class_code,
+        extension
+    ));
+    let tmp_display = tmp.display();
     let script = format!(
         "try\n\
-         set d to (the clipboard as \u{00AB}class PNGf\u{00BB})\n\
-         set f to open for access POSIX file \"{tmp}\" with write permission\n\
+         set d to (the clipboard as \u{00AB}class {class_code}\u{00BB})\n\
+         set f to open for access POSIX file \"{tmp_display}\" with write permission\n\
          write d to f\n\
          close access f\n\
          return \"ok\"\n\
@@ -1297,28 +1439,62 @@ fn grab_clipboard_image() -> Option<ImageAttachment> {
         .arg("-e")
         .arg(&script)
         .output()
-        .ok()?;
+        .context("failed to read macOS clipboard with osascript")?;
 
     if String::from_utf8_lossy(&out.stdout).trim() != "ok" {
-        return None;
+        let _ = fs::remove_file(&tmp);
+        bail!("clipboard does not contain {class_code} image data");
     }
 
-    let bytes = std::fs::read(&tmp).ok()?;
-    let _ = std::fs::remove_file(&tmp);
+    let bytes = fs::read(&tmp).with_context(|| format!("failed to read {tmp_display}"))?;
+    let _ = fs::remove_file(&tmp);
 
     if bytes.len() < 8 {
-        return None;
+        bail!("clipboard {class_code} image data is empty");
     }
 
-    Some(ImageAttachment {
-        mime: "image/png".to_string(),
-        data: BASE64.encode(&bytes),
-    })
+    Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn convert_tiff_to_png(tiff: &[u8]) -> Result<Vec<u8>> {
+    let base = std::env::temp_dir().join(format!("anveesa_clip_{}", std::process::id()));
+    let tiff_path = base.with_extension("tiff");
+    let png_path = base.with_extension("png");
+    fs::write(&tiff_path, tiff).context("failed to write temporary TIFF clipboard image")?;
+
+    let status = std::process::Command::new("sips")
+        .arg("-s")
+        .arg("format")
+        .arg("png")
+        .arg(&tiff_path)
+        .arg("--out")
+        .arg(&png_path)
+        .status()
+        .context("failed to convert clipboard TIFF to PNG with sips")?;
+
+    let _ = fs::remove_file(&tiff_path);
+    if !status.success() {
+        let _ = fs::remove_file(&png_path);
+        bail!("failed to convert clipboard TIFF image to PNG");
+    }
+
+    let bytes = fs::read(&png_path).context("failed to read converted clipboard PNG")?;
+    let _ = fs::remove_file(&png_path);
+    if bytes.len() < 8 {
+        bail!("converted clipboard PNG is empty");
+    }
+    Ok(bytes)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn grab_clipboard_image() -> Option<ImageAttachment> {
     None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_clipboard_image() -> Result<ImageAttachment> {
+    bail!("clipboard image attachment is only supported on macOS; use /attach path/to/image.png")
 }
 
 fn repl_history_path() -> Option<PathBuf> {
@@ -1531,6 +1707,32 @@ mod tests {
             buffer.display,
             "please read this: [Pasted text #1 +4 lines]"
         );
+    }
+
+    #[test]
+    fn parses_attach_commands() {
+        assert_eq!(parse_attach_command("/attach"), Some(None));
+        assert_eq!(
+            parse_attach_command("/attach screenshot.png"),
+            Some(Some("screenshot.png".into()))
+        );
+        assert_eq!(
+            parse_attach_command("/attach \"folder/my image.jpg\""),
+            Some(Some("folder/my image.jpg".into()))
+        );
+        assert_eq!(
+            parse_attach_command("/img '/tmp/capture.webp'"),
+            Some(Some("/tmp/capture.webp".into()))
+        );
+        assert_eq!(parse_attach_command("/attachment nope"), None);
+    }
+
+    #[test]
+    fn detects_image_mime_from_path() {
+        assert_eq!(image_mime_for_path(Path::new("a.png")), Some("image/png"));
+        assert_eq!(image_mime_for_path(Path::new("a.JPEG")), Some("image/jpeg"));
+        assert_eq!(image_mime_for_path(Path::new("a.webp")), Some("image/webp"));
+        assert_eq!(image_mime_for_path(Path::new("a.txt")), None);
     }
 
     #[test]
