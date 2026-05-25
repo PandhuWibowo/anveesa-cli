@@ -429,6 +429,13 @@ pub struct OpenAiCompatibleProviderConfig {
 
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+
+    /// Enable prompt caching. When true, adds `cache_control` markers to the
+    /// last static system message and the last history message so the provider
+    /// can cache those prefixes across turns.
+    /// For Anthropic models this also sends the `anthropic-beta: prompt-caching-2024-07-31` header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -464,6 +471,7 @@ fn insert_openai_provider(
             api_key_env: api_key_env.map(str::to_string),
             default_model: None,
             headers: BTreeMap::new(),
+            prompt_cache: None,
         }),
     );
 }

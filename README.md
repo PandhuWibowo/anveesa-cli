@@ -24,20 +24,23 @@ anveesa
 Running `anveesa` with no prompt opens an interactive prompt for the default provider:
 
 ```text
-+----------------------------------------------------------+
-| anveesa | provider: sumopod | model: kimi-k2.6           |
-| turns: 0 | ctx:on | tools:on | writes:ask | /clear /exit  |
-+----------------------------------------------------------+
->
+anveesa | provider: sumopod | model: kimi-k2.6
+state   | turns:0 | ctx:on | tools:on | writes:ask | memory:new
+commands| /clear reset | /exit quit
+approve | y once | a all for current turn | enter no
+
+anveesa[0]>
 ```
 
 Interactive mode keeps running after each answer. It also keeps the conversation
-context for the current terminal session. Use `/clear` to reset that context and
-`/exit` to return to the shell.
+context for the same provider/model/system in the same working directory, even
+after restarting Anveesa. Use `/clear` to reset that context and `/exit` to
+return to the shell.
 
 The prompt has full line editing, and your input history is remembered across
-sessions (stored next to the config as `history`). Use the up/down arrows to
-recall previous prompts.
+sessions (stored next to the config as `history`). The active conversation is
+stored next to it as `session.json`. Use the up/down arrows to recall previous
+prompts.
 
 `ctx:on` means Anveesa sends lightweight terminal context with each request:
 current directory, parent directory, git root/branch/status when available, and
@@ -50,18 +53,21 @@ snippets, and do a basic web lookup. The tools can inspect paths outside the
 current project, but obvious secret files such as SSH keys and `.env` files are
 blocked.
 
-`writes:ask` covers the workspace-modifying tools — `write_file`, `edit_file`,
-and `run_command`. By default Anveesa asks for confirmation on the terminal
-before each one:
+`writes:ask` covers the workspace-modifying tools — `create_dir`, `write_file`,
+`edit_file`, and `run_command`. By default Anveesa asks for confirmation on the
+terminal before each one:
 
 ```text
-allow run command `cargo test`? [y/N]
+allow run command `cargo test`? [y]es/[a]ll this turn/[N]o
 ```
 
+Answer `a` to approve the remaining write/run tools for the current assistant
+turn, which is useful when scaffolding several files.
+
 The indicator reflects the active policy: `writes:ask` (confirm each action,
-the interactive default), `writes:auto` (run without asking, enabled with
-`--yes`), or `writes:off` (disabled, the default for non-interactive one-shot
-runs unless `--yes` is passed).
+the interactive default and the default for one-shot prompts typed directly in a
+terminal), `writes:auto` (run without asking, enabled with `--yes`), or
+`writes:off` (disabled for non-interactive stdin runs unless `--yes` is passed).
 
 Responses stream token-by-token as the model generates them. While Anveesa waits
 for the first token it shows a small status line such as:
@@ -76,6 +82,11 @@ after the answer:
 ```text
 [tokens: 812 in / 144 out / 956 total]
 ```
+
+OpenAI-compatible providers can use up to 32 tool rounds per answer by default.
+After that, Anveesa stops advertising tools and asks the model to produce a
+final answer from the gathered results. Override the cap with
+`ANVEESA_MAX_TOOL_ROUNDS`, up to 256.
 
 Use GLM/Z.ai:
 
@@ -98,9 +109,9 @@ Pipe stdin into a prompt:
 git diff | anveesa ask --stdin "review this diff"
 ```
 
-Let the model make changes. In interactive mode it asks before each write or
-command. For one-shot runs, pass `--yes` (`-y`) to allow file writes and command
-execution without prompting:
+Let the model make changes. In interactive mode and one-shot terminal prompts,
+it asks before each write or command. Pass `--yes` (`-y`) to allow file writes
+and command execution without prompting:
 
 ```sh
 anveesa --provider sumopod --yes "add a Default impl for the Config struct"

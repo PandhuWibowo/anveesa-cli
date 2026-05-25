@@ -57,7 +57,9 @@ name = "anveesa"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
+ "libc",
  "reqwest",
  "rustyline",
  "serde",

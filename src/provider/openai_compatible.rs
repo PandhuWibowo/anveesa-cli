@@ -7,13 +7,20 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::{
     config::OpenAiCompatibleProviderConfig,
-    provider::{ApprovalPolicy, ChatRole, PromptRequest, StreamEvent, TurnResult, Usage},
+    provider::{
+        ApprovalDecision, ApprovalPolicy, ChatRole, DiffKind, DiffLine, PromptRequest, StreamEvent,
+        ToolConfirmPreview, TurnResult, Usage,
+    },
     tools,
 };
 
-const MAX_TOOL_ROUNDS: usize = 8;
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 32;
+const HARD_MAX_TOOL_ROUNDS: usize = 256;
+const MAX_TOOL_ROUNDS_ENV: &str = "ANVEESA_MAX_TOOL_ROUNDS";
 const MAX_RETRIES: usize = 2;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How many times the model may call the exact same (tool, arguments) pair before we refuse.
+const MAX_IDENTICAL_CALLS: usize = 3;
 
 pub async fn ask(
     provider_name: &str,
@@ -30,8 +37,12 @@ pub async fn ask(
             format!("provider '{provider_name}' requires --model or default_model in config")
         })?;
 
-    let headers = build_headers(config)?;
-    let mut messages = build_messages(&request, policy);
+    // Use the explicit config flag if set; otherwise auto-enable for Anthropic endpoints.
+    let prompt_cache = config
+        .prompt_cache
+        .unwrap_or_else(|| is_anthropic_url(&config.base_url));
+    let headers = build_headers(config, prompt_cache)?;
+    let mut messages = build_messages(&request, policy, prompt_cache);
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -42,6 +53,8 @@ pub async fn ask(
     let mut tools_enabled = true;
     let mut usage_requested = true;
     let mut tool_rounds = 0usize;
+    let max_tool_rounds = max_tool_rounds();
+    let mut approval_state = ToolApprovalState::default();
     let mut full_text = String::new();
     let mut last_usage: Option<Usage> = None;
 
@@ -92,20 +105,22 @@ pub async fn ask(
         if !tools_enabled {
             break;
         }
-        if tool_rounds >= MAX_TOOL_ROUNDS {
-            bail!("tool call limit reached ({MAX_TOOL_ROUNDS} rounds)");
-        }
         tool_rounds += 1;
 
         messages.push(assistant_tool_message(&state));
         for call in &state.tool_calls {
-            let content = dispatch_tool(call, policy, events).await;
+            let content = dispatch_tool(call, policy, &mut approval_state, events).await;
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call.id,
                 "name": call.name,
                 "content": content,
             }));
+        }
+
+        if tool_rounds >= max_tool_rounds {
+            tools_enabled = false;
+            messages.push(tool_limit_message(max_tool_rounds));
         }
     }
 
@@ -119,43 +134,365 @@ pub async fn ask(
     })
 }
 
+#[derive(Debug, Default)]
+struct ToolApprovalState {
+    allow_for_turn: bool,
+    /// Tracks how many times each identical (name, arguments) pair has been called this turn.
+    call_counts: std::collections::HashMap<(String, String), usize>,
+}
+
 async fn dispatch_tool(
     call: &PartialToolCall,
     policy: ApprovalPolicy,
+    approval_state: &mut ToolApprovalState,
     events: &UnboundedSender<StreamEvent>,
 ) -> String {
+    // Plan tools — display only, no approval or filesystem access needed.
+    if call.name == "set_plan" {
+        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            let tasks = args["steps"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let _ = events.send(StreamEvent::PlanSet { tasks });
+        }
+        return json!({"ok": true}).to_string();
+    }
+    if call.name == "complete_task" {
+        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            if let Some(index) = args["index"].as_u64() {
+                let _ = events.send(StreamEvent::PlanTaskDone {
+                    index: index as usize,
+                });
+            }
+        }
+        return json!({"ok": true}).to_string();
+    }
+
+    // Anti-loop guard: refuse if the model is calling the exact same (tool, args) repeatedly.
+    {
+        let key = (call.name.clone(), call.arguments.clone());
+        let count = approval_state.call_counts.entry(key).or_insert(0);
+        *count += 1;
+        if *count > MAX_IDENTICAL_CALLS {
+            return json!({
+                "ok": false,
+                "error": format!(
+                    "Refusing to run '{}' again: this identical call has already been made {} time(s) \
+                    this turn. Do NOT retry — stop and report the failure to the user.",
+                    call.name, *count - 1
+                )
+            })
+            .to_string();
+        }
+    }
+
     if tools::is_write_tool(&call.name) {
         if !policy.allows_write_tools() {
             return denied_message("write tools are disabled (pass --yes or run interactively)");
         }
-        if policy == ApprovalPolicy::Prompt && !request_approval(call, events).await {
-            return denied_message("user declined this action");
+    }
+
+    // Snapshot BEFORE the tool runs — needed both for preview and for post-run diff.
+    let file_op_snapshot = capture_file_op_snapshot(&call.name, &call.arguments);
+
+    let mut preview_was_shown = false;
+
+    if tools::is_write_tool(&call.name)
+        && policy == ApprovalPolicy::Prompt
+        && !approval_state.allow_for_turn
+    {
+        let preview = build_confirm_preview(&call.name, &call.arguments, &file_op_snapshot);
+        preview_was_shown = true;
+        match request_approval_with_preview(preview, events).await {
+            ApprovalDecision::AllowOnce => {}
+            ApprovalDecision::AllowForTurn => approval_state.allow_for_turn = true,
+            ApprovalDecision::Deny => return denied_message("user declined this action"),
         }
     }
 
-    tools::run(&call.name, &call.arguments).await
+    let result = tools::run(&call.name, &call.arguments).await;
+
+    // When the user already reviewed the diff in the approval preview, skip the
+    // post-run FileOp so the same diff isn't printed twice.
+    if !preview_was_shown {
+        if let Some(snapshot) = file_op_snapshot {
+            if let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&result) {
+                if result_json["ok"].as_bool().unwrap_or(false) {
+                    emit_file_op_event(snapshot, &result_json, events);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+// ── File-op diff helpers ──────────────────────────────────────────────────────
+
+enum FileOpSnapshot {
+    Write {
+        path: String,
+        lines: Vec<String>,
+        total: usize,
+    },
+    Edit {
+        path: String,
+        start_line: usize,
+        old_lines: Vec<String>,
+        new_lines: Vec<String>,
+    },
+    CreateDir {
+        path: String,
+    },
+}
+
+fn capture_file_op_snapshot(tool_name: &str, arguments: &str) -> Option<FileOpSnapshot> {
+    let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    match tool_name {
+        "write_file" => {
+            let path = args["path"].as_str()?.to_string();
+            let content = args["content"].as_str().unwrap_or("");
+            let all: Vec<String> = content.lines().map(str::to_string).collect();
+            let total = all.len();
+            Some(FileOpSnapshot::Write {
+                path,
+                lines: all.into_iter().take(20).collect(),
+                total,
+            })
+        }
+        "edit_file" => {
+            let path = args["path"].as_str()?.to_string();
+            let old = args["old_string"].as_str().unwrap_or("");
+            let new = args["new_string"].as_str().unwrap_or("");
+            let start_line = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|content| {
+                    let pos = content.find(old)?;
+                    Some(content[..pos].lines().count() + 1)
+                })
+                .unwrap_or(1);
+            Some(FileOpSnapshot::Edit {
+                path,
+                start_line,
+                old_lines: old.lines().map(str::to_string).collect(),
+                new_lines: new.lines().map(str::to_string).collect(),
+            })
+        }
+        "create_dir" => {
+            let path = args["path"].as_str()?.to_string();
+            Some(FileOpSnapshot::CreateDir { path })
+        }
+        _ => None,
+    }
+}
+
+fn emit_file_op_event(
+    snapshot: FileOpSnapshot,
+    result: &serde_json::Value,
+    events: &tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+) {
+    const MAX_PREVIEW: usize = 20;
+
+    let event = match snapshot {
+        FileOpSnapshot::Write { path, lines, total } => {
+            let verb = if result["created"].as_bool().unwrap_or(true) {
+                "Create"
+            } else {
+                "Update"
+            }
+            .to_string();
+            let truncated = total > MAX_PREVIEW;
+            let preview = lines
+                .into_iter()
+                .enumerate()
+                .map(|(i, text)| DiffLine {
+                    kind: DiffKind::Add,
+                    line_no: i + 1,
+                    text,
+                })
+                .collect();
+            StreamEvent::FileOp {
+                verb,
+                path,
+                added: total,
+                removed: 0,
+                preview,
+                truncated,
+            }
+        }
+        FileOpSnapshot::Edit {
+            path,
+            start_line,
+            old_lines,
+            new_lines,
+        } => {
+            let added = new_lines.len();
+            let removed = old_lines.len();
+            // Cap: show at most MAX_PREVIEW removed + MAX_PREVIEW added
+            let cap = MAX_PREVIEW;
+            let truncated = old_lines.len() > cap || new_lines.len() > cap;
+            let mut preview: Vec<DiffLine> = old_lines
+                .into_iter()
+                .take(cap)
+                .enumerate()
+                .map(|(i, text)| DiffLine {
+                    kind: DiffKind::Remove,
+                    line_no: start_line + i,
+                    text,
+                })
+                .collect();
+            for (i, text) in new_lines.into_iter().take(cap).enumerate() {
+                preview.push(DiffLine {
+                    kind: DiffKind::Add,
+                    line_no: start_line + i,
+                    text,
+                });
+            }
+            StreamEvent::FileOp {
+                verb: "Update".to_string(),
+                path,
+                added,
+                removed,
+                preview,
+                truncated,
+            }
+        }
+        FileOpSnapshot::CreateDir { path } => StreamEvent::FileOp {
+            verb: "Create dir".to_string(),
+            path,
+            added: 0,
+            removed: 0,
+            preview: vec![],
+            truncated: false,
+        },
+    };
+
+    let _ = events.send(event);
+}
+
+fn max_tool_rounds() -> usize {
+    parse_tool_round_limit(std::env::var(MAX_TOOL_ROUNDS_ENV).ok().as_deref())
+}
+
+fn parse_tool_round_limit(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_TOOL_ROUNDS)
+        .min(HARD_MAX_TOOL_ROUNDS)
+}
+
+fn tool_limit_message(max_tool_rounds: usize) -> Value {
+    json!({
+        "role": "system",
+        "content": format!(
+            "Anveesa has already run {max_tool_rounds} tool rounds for this answer. Do not call tools again. Use the tool results already provided to produce the best final answer. If the requested work is not complete, say exactly what remains."
+        )
+    })
 }
 
 fn denied_message(reason: &str) -> String {
     json!({ "ok": false, "error": reason }).to_string()
 }
 
-async fn request_approval(
-    call: &PartialToolCall,
-    events: &UnboundedSender<StreamEvent>,
-) -> bool {
-    let (reply, answer) = oneshot::channel();
-    let event = StreamEvent::Confirm {
-        summary: tools::describe_call(&call.name, &call.arguments),
-        reply,
-    };
-    if events.send(event).is_err() {
-        return false;
+fn build_confirm_preview(
+    tool_name: &str,
+    arguments: &str,
+    snapshot: &Option<FileOpSnapshot>,
+) -> ToolConfirmPreview {
+    const CAP: usize = 20;
+    match snapshot {
+        Some(FileOpSnapshot::Write { path, lines, total }) => {
+            let verb = if std::path::Path::new(path).exists() {
+                "Update"
+            } else {
+                "Create"
+            };
+            let truncated = *total > CAP;
+            let diff = lines
+                .iter()
+                .enumerate()
+                .map(|(i, text)| DiffLine {
+                    kind: DiffKind::Add,
+                    line_no: i + 1,
+                    text: text.clone(),
+                })
+                .collect();
+            ToolConfirmPreview::FileOp {
+                verb: verb.to_string(),
+                path: path.clone(),
+                added: *total,
+                removed: 0,
+                diff,
+                truncated,
+            }
+        }
+        Some(FileOpSnapshot::Edit {
+            path,
+            start_line,
+            old_lines,
+            new_lines,
+        }) => {
+            let truncated = old_lines.len() > CAP || new_lines.len() > CAP;
+            let mut diff: Vec<DiffLine> = old_lines
+                .iter()
+                .take(CAP)
+                .enumerate()
+                .map(|(i, text)| DiffLine {
+                    kind: DiffKind::Remove,
+                    line_no: start_line + i,
+                    text: text.clone(),
+                })
+                .collect();
+            for (i, text) in new_lines.iter().take(CAP).enumerate() {
+                diff.push(DiffLine {
+                    kind: DiffKind::Add,
+                    line_no: start_line + i,
+                    text: text.clone(),
+                });
+            }
+            ToolConfirmPreview::FileOp {
+                verb: "Update".to_string(),
+                path: path.clone(),
+                added: new_lines.len(),
+                removed: old_lines.len(),
+                diff,
+                truncated,
+            }
+        }
+        Some(FileOpSnapshot::CreateDir { path }) => {
+            ToolConfirmPreview::CreateDir { path: path.clone() }
+        }
+        None => ToolConfirmPreview::Generic {
+            summary: tools::describe_call(tool_name, arguments),
+        },
     }
-    answer.await.unwrap_or(false)
 }
 
-fn build_headers(config: &OpenAiCompatibleProviderConfig) -> Result<HeaderMap> {
+async fn request_approval_with_preview(
+    preview: ToolConfirmPreview,
+    events: &UnboundedSender<StreamEvent>,
+) -> ApprovalDecision {
+    let (reply, answer) = oneshot::channel();
+    if events
+        .send(StreamEvent::Confirm { preview, reply })
+        .is_err()
+    {
+        return ApprovalDecision::Deny;
+    }
+    answer.await.unwrap_or(ApprovalDecision::Deny)
+}
+
+fn is_anthropic_url(base_url: &str) -> bool {
+    base_url.contains("anthropic.com")
+}
+
+fn build_headers(config: &OpenAiCompatibleProviderConfig, prompt_cache: bool) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -178,10 +515,21 @@ fn build_headers(config: &OpenAiCompatibleProviderConfig) -> Result<HeaderMap> {
         );
     }
 
+    if prompt_cache {
+        headers.insert(
+            HeaderName::from_static("anthropic-beta"),
+            HeaderValue::from_static("prompt-caching-2024-07-31"),
+        );
+    }
+
     Ok(headers)
 }
 
-fn build_messages(request: &PromptRequest, policy: ApprovalPolicy) -> Vec<Value> {
+fn build_messages(
+    request: &PromptRequest,
+    policy: ApprovalPolicy,
+    prompt_cache: bool,
+) -> Vec<Value> {
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
         messages.push(json!({ "role": "system", "content": system }));
@@ -189,7 +537,8 @@ fn build_messages(request: &PromptRequest, policy: ApprovalPolicy) -> Vec<Value>
     if let Some(workspace_context) = &request.workspace_context {
         messages.push(json!({ "role": "system", "content": workspace_context }));
     }
-    messages.push(json!({ "role": "system", "content": tools::guidance(policy.allows_write_tools()) }));
+    messages
+        .push(json!({ "role": "system", "content": tools::guidance(policy.allows_write_tools()) }));
     for message in &request.history {
         let role = match message.role {
             ChatRole::User => "user",
@@ -197,8 +546,73 @@ fn build_messages(request: &PromptRequest, policy: ApprovalPolicy) -> Vec<Value>
         };
         messages.push(json!({ "role": role, "content": message.content }));
     }
-    messages.push(json!({ "role": "user", "content": request.prompt }));
+
+    // Current user turn — multimodal when a clipboard image is attached.
+    let user_content = match &request.image {
+        Some(img) => json!([
+            { "type": "text", "text": &request.prompt },
+            { "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", img.mime, img.data) } }
+        ]),
+        None => json!(&request.prompt),
+    };
+    messages.push(json!({ "role": "user", "content": user_content }));
+
+    if prompt_cache {
+        apply_cache_breakpoints(&mut messages);
+    }
+
     messages
+}
+
+/// Add `cache_control: {type: "ephemeral"}` to two breakpoints in the message list:
+/// 1. The last system message (tools guidance — large, fully static).
+/// 2. The last history message before the current user turn (grows each turn).
+///
+/// Everything up to each breakpoint is served from cache on subsequent turns.
+fn apply_cache_breakpoints(messages: &mut Vec<Value>) {
+    let current_turn_idx = messages.len() - 1;
+
+    // Breakpoint 1: last system message
+    if let Some(idx) = messages[..current_turn_idx]
+        .iter()
+        .rposition(|m| m["role"] == "system")
+    {
+        add_cache_control(&mut messages[idx]);
+    }
+
+    // Breakpoint 2: last history message (user or assistant before the current turn)
+    if let Some(idx) = messages[..current_turn_idx]
+        .iter()
+        .rposition(|m| m["role"] != "system")
+    {
+        add_cache_control(&mut messages[idx]);
+    }
+}
+
+/// Convert a message's `content` to the array form required by Anthropic caching,
+/// then inject `cache_control: {type: "ephemeral"}` on the last content block.
+fn add_cache_control(message: &mut Value) {
+    let content = match message.get("content").cloned() {
+        Some(c) => c,
+        None => return,
+    };
+
+    let cached = match content {
+        Value::String(s) => json!([{
+            "type": "text",
+            "text": s,
+            "cache_control": { "type": "ephemeral" }
+        }]),
+        Value::Array(mut arr) => {
+            if let Some(last) = arr.last_mut().and_then(Value::as_object_mut) {
+                last.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+            }
+            Value::Array(arr)
+        }
+        other => other,
+    };
+
+    message["content"] = cached;
 }
 
 async fn send_with_retry(
@@ -209,7 +623,13 @@ async fn send_with_retry(
 ) -> Result<reqwest::Response> {
     let mut attempt = 0usize;
     loop {
-        match client.post(url).headers(headers.clone()).json(body).send().await {
+        match client
+            .post(url)
+            .headers(headers.clone())
+            .json(body)
+            .send()
+            .await
+        {
             Ok(response) => {
                 if response.status().is_server_error() && attempt < MAX_RETRIES {
                     attempt += 1;
@@ -346,13 +766,34 @@ impl StreamState {
 
 fn parse_usage(value: &Value) -> Option<Usage> {
     let object = value.as_object()?;
+
+    // Anthropic uses top-level cache fields; OpenAI nests them under prompt_tokens_details.
+    let details = object.get("prompt_tokens_details");
+    let cache_read_tokens = object
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| details?.get("cached_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let cache_write_tokens = object
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
     Some(Usage {
-        prompt_tokens: object.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+        prompt_tokens: object
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         completion_tokens: object
             .get("completion_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
-        total_tokens: object.get("total_tokens").and_then(Value::as_u64).unwrap_or(0),
+        total_tokens: object
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_read_tokens,
+        cache_write_tokens,
     })
 }
 
@@ -411,7 +852,10 @@ mod tests {
     fn ignores_empty_content_delta() {
         let mut state = StreamState::default();
         assert_eq!(state.apply_chunk(&chunk("")), None);
-        assert_eq!(state.apply_chunk(&json!({ "choices": [{ "delta": {} }] })), None);
+        assert_eq!(
+            state.apply_chunk(&json!({ "choices": [{ "delta": {} }] })),
+            None
+        );
     }
 
     #[test]
@@ -449,11 +893,17 @@ mod tests {
     #[test]
     fn ingest_line_handles_sse_framing() {
         let mut state = StreamState::default();
-        assert_eq!(state.ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"), Some("hi".to_string()));
+        assert_eq!(
+            state.ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"),
+            Some("hi".to_string())
+        );
         assert_eq!(state.ingest_line(""), None);
         assert_eq!(state.ingest_line("data: [DONE]"), None);
         assert!(state.done);
-        assert_eq!(state.ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}"), None);
+        assert_eq!(
+            state.ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}"),
+            None
+        );
     }
 
     #[test]
@@ -461,5 +911,29 @@ mod tests {
         assert!(is_tool_parameter_error("This model does not support tools"));
         assert!(is_stream_options_error("Unknown field stream_options"));
         assert!(!is_stream_options_error("rate limit exceeded"));
+    }
+
+    #[test]
+    fn parses_tool_round_limit() {
+        assert_eq!(parse_tool_round_limit(None), DEFAULT_MAX_TOOL_ROUNDS);
+        assert_eq!(parse_tool_round_limit(Some("12")), 12);
+        assert_eq!(parse_tool_round_limit(Some("0")), DEFAULT_MAX_TOOL_ROUNDS);
+        assert_eq!(
+            parse_tool_round_limit(Some("nope")),
+            DEFAULT_MAX_TOOL_ROUNDS
+        );
+        assert_eq!(parse_tool_round_limit(Some("999")), HARD_MAX_TOOL_ROUNDS);
+    }
+
+    #[test]
+    fn tool_limit_message_forces_final_answer() {
+        let message = tool_limit_message(3);
+        assert_eq!(message["role"], json!("system"));
+        assert!(
+            message["content"]
+                .as_str()
+                .unwrap()
+                .contains("Do not call tools again")
+        );
     }
 }

@@ -217,6 +217,7 @@ mod tests {
             system: None,
             workspace_context: None,
             history: vec![],
+            image: None,
         }
     }
 

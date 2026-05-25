@@ -28,17 +28,29 @@ search text, read capped file snippets, and do a basic public web lookup. Prefer
     );
     if include_write {
         text.push_str(
-            " You may also modify the workspace with write_file, edit_file, and run_command. \
+            " You may also modify the workspace with create_dir, write_file, edit_file, and run_command. \
 These actions can require the user to approve them, so explain what you intend to do.",
         );
     }
+    text.push_str(
+        " For any multi-step task, start by calling set_plan with a list of the steps you will take. \
+After each step completes, call complete_task with the zero-based index of that step. \
+Do not describe your plan in prose — use set_plan instead.",
+    );
+    text.push_str(
+        " If a tool call fails or a command times out, do NOT retry it automatically. \
+Stop immediately, report the exact error to the user, and wait for their input.",
+    );
     text.push_str(" Never request or expose secrets such as API keys, SSH keys, or .env files.");
     text
 }
 
 /// Whether a tool modifies the system and must pass the approval policy.
 pub fn is_write_tool(name: &str) -> bool {
-    matches!(name, "write_file" | "edit_file" | "run_command")
+    matches!(
+        name,
+        "create_dir" | "write_file" | "edit_file" | "run_command"
+    )
 }
 
 /// A short, human-readable summary of a tool call for confirmation prompts.
@@ -46,6 +58,7 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     let field = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("");
     match name {
+        "create_dir" => format!("create directory {}", field("path")),
         "write_file" => format!("write file {}", field("path")),
         "edit_file" => format!("edit file {}", field("path")),
         "run_command" => format!("run command `{}`", field("command")),
@@ -55,6 +68,41 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
 
 pub fn definitions(include_write: bool) -> Vec<Value> {
     let mut definitions = vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "set_plan",
+                "description": "Display a numbered task checklist of what you will do. Call this once at the start of any multi-step task before taking any action.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Ordered list of task descriptions."
+                        }
+                    },
+                    "required": ["steps"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "complete_task",
+                "description": "Mark a step in the current plan as completed. Call this immediately after finishing each step.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "index": {
+                            "type": "integer",
+                            "description": "Zero-based index of the completed step."
+                        }
+                    },
+                    "required": ["index"]
+                }
+            }
+        }),
         json!({
             "type": "function",
             "function": {
@@ -135,6 +183,20 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
             json!({
                 "type": "function",
                 "function": {
+                    "name": "create_dir",
+                    "description": "Create a directory, including parent directories as needed. Use this for requests to make folders.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Directory path. Relative paths resolve from the terminal cwd." }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
                     "name": "write_file",
                     "description": "Create or overwrite a text file with the given content. Parent directories are created as needed.",
                     "parameters": {
@@ -191,6 +253,7 @@ pub async fn run(name: &str, arguments: &str) -> String {
         "search_text" => search_text(arguments).await,
         "read_file" => read_file(arguments).await,
         "web_search" => web_search(arguments).await,
+        "create_dir" => create_dir(arguments).await,
         "write_file" => write_file(arguments).await,
         "edit_file" => edit_file(arguments).await,
         "run_command" => run_command(arguments).await,
@@ -394,11 +457,37 @@ async fn web_search(arguments: &str) -> Result<Value> {
     }))
 }
 
+async fn create_dir(arguments: &str) -> Result<Value> {
+    let args: CreateDirArgs = parse_args(arguments)?;
+    let path = resolve_writable_path(&args.path)?;
+    if is_sensitive_path(&path) {
+        bail!(
+            "refusing to create sensitive-looking directory {}",
+            path.display()
+        );
+    }
+    if path.exists() && !path.is_dir() {
+        bail!("{} exists and is not a directory", path.display());
+    }
+
+    let existed = path.exists();
+    fs::create_dir_all(&path).with_context(|| format!("failed to create {}", path.display()))?;
+
+    Ok(json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "created": !existed,
+    }))
+}
+
 async fn write_file(arguments: &str) -> Result<Value> {
     let args: WriteFileArgs = parse_args(arguments)?;
     let path = resolve_writable_path(&args.path)?;
     if is_sensitive_path(&path) {
-        bail!("refusing to write sensitive-looking file {}", path.display());
+        bail!(
+            "refusing to write sensitive-looking file {}",
+            path.display()
+        );
     }
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -444,7 +533,10 @@ async fn edit_file(arguments: &str) -> Result<Value> {
     match occurrences {
         0 => bail!("old_string was not found in {}", path.display()),
         1 => {}
-        n => bail!("old_string appears {n} times in {}; make it unique", path.display()),
+        n => bail!(
+            "old_string appears {n} times in {}; make it unique",
+            path.display()
+        ),
     }
 
     let updated = content.replacen(&args.old_string, &args.new_string, 1);
@@ -481,7 +573,11 @@ async fn run_command(arguments: &str) -> Result<Value> {
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(result) => result.context("failed to run command")?,
         Err(_) => {
-            bail!("command timed out after {} seconds", timeout.as_secs());
+            bail!(
+                "Command timed out after {}s. \
+                Do NOT retry this command — report the timeout to the user and ask for guidance.",
+                timeout.as_secs()
+            );
         }
     };
 
@@ -506,6 +602,11 @@ fn cap_output(bytes: &[u8]) -> String {
 #[derive(Debug, Deserialize)]
 struct PathArgs {
     path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDirArgs {
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -724,6 +825,7 @@ mod tests {
 
         let with_writes = definitions(true);
         let names: Vec<&str> = with_writes.iter().map(tool_name).collect();
+        assert!(names.contains(&"create_dir"));
         assert!(names.contains(&"write_file"));
         assert!(names.contains(&"edit_file"));
         assert!(names.contains(&"run_command"));
@@ -735,6 +837,7 @@ mod tests {
 
     #[test]
     fn classifies_write_tools() {
+        assert!(is_write_tool("create_dir"));
         assert!(is_write_tool("write_file"));
         assert!(is_write_tool("run_command"));
         assert!(!is_write_tool("read_file"));
@@ -743,6 +846,10 @@ mod tests {
 
     #[test]
     fn describes_calls_for_confirmation() {
+        assert_eq!(
+            describe_call("create_dir", r#"{"path":"hello"}"#),
+            "create directory hello"
+        );
         assert_eq!(
             describe_call("write_file", r#"{"path":"a.txt","content":"x"}"#),
             "write file a.txt"
@@ -756,6 +863,7 @@ mod tests {
     #[test]
     fn guidance_mentions_writes_only_when_enabled() {
         assert!(!guidance(false).contains("write_file"));
+        assert!(guidance(true).contains("create_dir"));
         assert!(guidance(true).contains("write_file"));
     }
 
@@ -784,6 +892,25 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn create_dir_creates_nested_directory() {
+        let dir = temp_dir("mkdir");
+        let path = dir.join("hello").join("world");
+        let result = create_dir(&json!({ "path": path.to_str().unwrap() }).to_string())
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(result["created"], json!(true));
+        assert!(path.is_dir());
+
+        let result = create_dir(&json!({ "path": path.to_str().unwrap() }).to_string())
+            .await
+            .unwrap();
+        assert_eq!(result["created"], json!(false));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]

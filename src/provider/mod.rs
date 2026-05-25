@@ -2,11 +2,12 @@ mod command;
 mod openai_compatible;
 
 use anyhow::{Result, anyhow};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::config::{AppConfig, ProviderConfig};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
@@ -28,10 +29,17 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChatRole {
     User,
     Assistant,
+}
+
+/// A base64-encoded image attached to the current user turn.
+#[derive(Debug, Clone)]
+pub struct ImageAttachment {
+    pub mime: String, // e.g. "image/png"
+    pub data: String, // base64-encoded bytes
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +49,8 @@ pub struct PromptRequest {
     pub system: Option<String>,
     pub workspace_context: Option<String>,
     pub history: Vec<ChatMessage>,
+    /// Optional image grabbed from the clipboard for the current turn only.
+    pub image: Option<ImageAttachment>,
 }
 
 /// How tool calls that modify the system (write/edit/run) should be handled.
@@ -52,6 +62,14 @@ pub enum ApprovalPolicy {
     Prompt,
     /// Run write/run tools without asking.
     Allow,
+}
+
+/// User decision for a write/run tool confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    Deny,
+    AllowOnce,
+    AllowForTurn,
 }
 
 impl ApprovalPolicy {
@@ -67,6 +85,28 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Tokens served from the prompt cache (Anthropic: cache_read_input_tokens; OpenAI: cached_tokens).
+    pub cache_read_tokens: u64,
+    /// Tokens written into the prompt cache this turn (Anthropic: cache_creation_input_tokens).
+    pub cache_write_tokens: u64,
+}
+
+/// What to show in the approval dialog before running a write/run tool.
+#[derive(Debug)]
+pub enum ToolConfirmPreview {
+    /// A file write or edit — diff lines already computed from the arguments.
+    FileOp {
+        verb: String,
+        path: String,
+        added: usize,
+        removed: usize,
+        diff: Vec<DiffLine>,
+        truncated: bool,
+    },
+    /// A directory that will be created.
+    CreateDir { path: String },
+    /// Any other write/run tool — show a plain-text description.
+    Generic { summary: String },
 }
 
 /// Events streamed from a provider back to the renderer, which owns the terminal.
@@ -76,12 +116,38 @@ pub enum StreamEvent {
     Token(String),
     /// Final token accounting for the turn.
     Usage(Usage),
-    /// A write/run tool needs the user's approval. The renderer prompts on the
-    /// terminal and sends the decision back through the reply channel.
+    /// A write/run tool needs the user's approval. The renderer shows the
+    /// preview, prompts for a decision, and sends it back through the reply channel.
     Confirm {
-        summary: String,
-        reply: oneshot::Sender<bool>,
+        preview: ToolConfirmPreview,
+        reply: oneshot::Sender<ApprovalDecision>,
     },
+    /// A file was created or edited — show a diff-style summary.
+    FileOp {
+        verb: String,
+        path: String,
+        added: usize,
+        removed: usize,
+        preview: Vec<DiffLine>,
+        truncated: bool,
+    },
+    /// The model announced a multi-step plan.
+    PlanSet { tasks: Vec<String> },
+    /// The model marked one plan step as complete.
+    PlanTaskDone { index: usize },
+}
+
+#[derive(Debug)]
+pub enum DiffKind {
+    Add,
+    Remove,
+}
+
+#[derive(Debug)]
+pub struct DiffLine {
+    pub kind: DiffKind,
+    pub line_no: usize,
+    pub text: String,
 }
 
 /// What the provider produced for a single turn.
