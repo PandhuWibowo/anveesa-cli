@@ -1,0 +1,30 @@
+{
+  "name": "anveesa",
+  "version": "0.1.0",
+  "description": "AI agent CLI wrapper - Node.js interface for the Rust anveesa binary",
+  "main": "index.js",
+  "bin": {
+    "anveesa": "./bin/anveesa.js"
+  },
+  "scripts": {
+    "install": "node -e 'console.log(\"anveesa CLI requires Rust binary. Run: cargo build --release\")'",
+    "postinstall": "node -e 'if (process.platform !== \"linux\" && process.platform !== \"darwin\" && process.platform !== \"win32\") { console.error(\"Platform not supported\") } else { console.log(\"anveesa CLI wrapper installed\") }'"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "agent",
+    "anveesa",
+    "rust"
+  ],
+  "author": "Anveesa",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pandhuwibowo/anveesa-cli.git"
+  },
+  "homepage": "https://github.com/pandhuwibowo/anveesa-cli",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
