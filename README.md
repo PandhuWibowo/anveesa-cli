@@ -1,7 +1,7 @@
 # Anveesa
 
 Anveesa is a Rust terminal wrapper for AI providers. It gives you one command,
-`anveesa`, while each provider is configured as either:
+`anveesa`, for interactive prompts and one-shot terminal requests.
 
 ## 📦 Publishing to npm
 
@@ -12,20 +12,6 @@ Anveesa can be published as an npm package via a Node.js wrapper that invokes th
 ```bash
 npm install -g anveesa
 ```
-
-### Build and publish
-
-```bash
-git tag v$(node -p "require('./package.json').version")
-git push origin main --tags
-npm publish
-```
-
-Wait for the GitHub release binary workflow to finish before publishing to npm.
-See `npm-publish.md` for the full release checklist.
-
-- `openai-compatible`: HTTP chat completions providers such as OpenRouter and other compatible gateways.
-- `command`: local CLIs such as Codex, Copilot, and Claude Code, where Anveesa spawns a command and passes the prompt.
 
 ## Install locally
 
