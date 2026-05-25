@@ -326,6 +326,7 @@ async fn render_stream(
     let mut usage: Option<Usage> = None;
     let mut plan_tasks: Vec<String> = vec![];
     let mut plan_done: Vec<bool> = vec![];
+    let mut status_message = "Waiting for provider response".to_string();
 
     static TIPS: &[&str] = &[
         "Tip: type /clear to reset context",
@@ -337,6 +338,18 @@ async fn render_stream(
     loop {
         tokio::select! {
             maybe = rx.recv() => match maybe {
+                Some(StreamEvent::Status { message }) => {
+                    clear_spinner(spinner, spinner_active);
+                    spinner_active = false;
+                    if line_open {
+                        println!();
+                        line_open = false;
+                    }
+                    status_message = message;
+                    print_status(&status_message, spinner);
+                    first_token = true;
+                    frame = 0;
+                }
                 Some(StreamEvent::Token(text)) => {
                     if first_token {
                         clear_spinner(spinner, spinner_active);
@@ -359,7 +372,24 @@ async fn render_stream(
                         println!();
                         line_open = false;
                     }
+                    status_message = format!("Running {summary}");
                     print_tool_call(&summary, spinner);
+                    first_token = true;
+                    frame = 0;
+                }
+                Some(StreamEvent::ToolResult { summary, ok, elapsed_ms, error }) => {
+                    clear_spinner(spinner, spinner_active);
+                    spinner_active = false;
+                    if line_open {
+                        println!();
+                        line_open = false;
+                    }
+                    print_tool_result(&summary, ok, elapsed_ms, error.as_deref(), spinner);
+                    status_message = if ok {
+                        "Waiting for the model to continue".to_string()
+                    } else {
+                        "Waiting for the model to handle the tool failure".to_string()
+                    };
                     first_token = true;
                     frame = 0;
                 }
@@ -374,6 +404,20 @@ async fn render_stream(
                         show_confirm_preview(&preview, spinner);
                         prompt_confirm_decision(spinner)
                     });
+                    match decision {
+                        ApprovalDecision::AllowOnce => {
+                            print_status("Approved; applying action", spinner);
+                            status_message = "Applying approved action".to_string();
+                        }
+                        ApprovalDecision::AllowForTurn => {
+                            print_status("Approved all actions for this turn; applying action", spinner);
+                            status_message = "Applying approved action".to_string();
+                        }
+                        ApprovalDecision::Deny => {
+                            print_status("Declined action; returning decision to model", spinner);
+                            status_message = "Waiting for the model to continue".to_string();
+                        }
+                    }
                     let _ = reply.send(decision);
                     // Re-arm the spinner for the next API round.
                     first_token = true;
@@ -428,17 +472,18 @@ async fn render_stream(
                 let dots = ["", ".", "..", "…"][frame % 4];
                 // Tip rotates every 40 frames (~4 s)
                 let tip = TIPS[(frame / 40) % TIPS.len()];
+                let status = truncate_for_status(&status_message, 76);
 
                 if !spinner_active {
                     // First paint — just print 2 lines (no overwrite needed).
                     eprint!(
-                        "\x1b[1;32m+\x1b[0m Thinking{dots} \x1b[2m({time_str})\x1b[0m\n  \x1b[90m└\x1b[0m \x1b[2m{tip}\x1b[0m"
+                        "\x1b[1;32m+\x1b[0m {status}{dots} \x1b[2m({time_str})\x1b[0m\n  \x1b[90m└\x1b[0m \x1b[2m{tip}\x1b[0m"
                     );
                     spinner_active = true;
                 } else {
                     // Overwrite: move up 1 line, clear both lines, reprint.
                     eprint!(
-                        "\r\x1b[2K\x1b[1A\x1b[2K\r\x1b[1;32m+\x1b[0m Thinking{dots} \x1b[2m({time_str})\x1b[0m\n  \x1b[90m└\x1b[0m \x1b[2m{tip}\x1b[0m"
+                        "\r\x1b[2K\x1b[1A\x1b[2K\r\x1b[1;32m+\x1b[0m {status}{dots} \x1b[2m({time_str})\x1b[0m\n  \x1b[90m└\x1b[0m \x1b[2m{tip}\x1b[0m"
                     );
                 }
                 let _ = io::stderr().flush();
@@ -480,6 +525,33 @@ fn print_tool_call(summary: &str, is_tty: bool) {
         eprintln!("\x1b[90m  └─ {summary}\x1b[0m");
     } else {
         eprintln!("tool: {summary}");
+    }
+}
+
+fn print_status(message: &str, is_tty: bool) {
+    if is_tty {
+        eprintln!("\x1b[90m  · {message}\x1b[0m");
+    } else {
+        eprintln!("status: {message}");
+    }
+}
+
+fn print_tool_result(summary: &str, ok: bool, elapsed_ms: u128, error: Option<&str>, is_tty: bool) {
+    let elapsed = format_duration_ms(elapsed_ms);
+    if is_tty {
+        if ok {
+            eprintln!("\x1b[1;32m  ✓\x1b[0m \x1b[90m{summary} completed in {elapsed}\x1b[0m");
+        } else if let Some(error) = error {
+            eprintln!("\x1b[1;31m  ✗\x1b[0m \x1b[90m{summary} failed in {elapsed}: {error}\x1b[0m");
+        } else {
+            eprintln!("\x1b[1;31m  ✗\x1b[0m \x1b[90m{summary} failed in {elapsed}\x1b[0m");
+        }
+    } else if ok {
+        eprintln!("tool ok: {summary} ({elapsed})");
+    } else if let Some(error) = error {
+        eprintln!("tool failed: {summary} ({elapsed}): {error}");
+    } else {
+        eprintln!("tool failed: {summary} ({elapsed})");
     }
 }
 
@@ -588,6 +660,29 @@ fn format_elapsed(secs: f32) -> String {
     } else {
         format!("{s}s")
     }
+}
+
+fn format_duration_ms(ms: u128) -> String {
+    if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+fn truncate_for_status(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut output = String::new();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return output;
+        };
+        output.push(ch);
+    }
+    if chars.next().is_some() {
+        output.push('…');
+    }
+    output
 }
 
 fn show_confirm_preview(preview: &ToolConfirmPreview, is_tty: bool) {

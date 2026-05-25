@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
@@ -62,6 +62,14 @@ pub async fn ask(
     let mut tool_intent_reprompts = 0usize;
 
     loop {
+        let _ = events.send(StreamEvent::Status {
+            message: if tool_rounds == 0 {
+                format!("Waiting for {provider_name} response")
+            } else {
+                format!("Sending tool results to {provider_name}")
+            },
+        });
+
         let mut body = json!({
             "model": model,
             "messages": messages,
@@ -134,6 +142,10 @@ pub async fn ask(
             }));
         }
 
+        let _ = events.send(StreamEvent::Status {
+            message: "Tool results sent; waiting for the next model response".to_string(),
+        });
+
         if tool_rounds >= max_tool_rounds {
             tools_enabled = false;
             messages.push(tool_limit_message(max_tool_rounds));
@@ -163,6 +175,8 @@ async fn dispatch_tool(
     approval_state: &mut ToolApprovalState,
     events: &UnboundedSender<StreamEvent>,
 ) -> String {
+    let summary = tools::describe_call(&call.name, &call.arguments);
+
     // Plan tools — display only, no approval or filesystem access needed.
     if call.name == "set_plan" {
         if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
@@ -213,7 +227,7 @@ async fn dispatch_tool(
         }
     } else {
         let _ = events.send(StreamEvent::ToolCall {
-            summary: tools::describe_call(&call.name, &call.arguments),
+            summary: summary.clone(),
         });
     }
 
@@ -233,9 +247,24 @@ async fn dispatch_tool(
             ApprovalDecision::AllowForTurn => approval_state.allow_for_turn = true,
             ApprovalDecision::Deny => return denied_message("user declined this action"),
         }
+        let _ = events.send(StreamEvent::Status {
+            message: format!("Applying approved action: {summary}"),
+        });
+    } else if tools::is_write_tool(&call.name) {
+        let _ = events.send(StreamEvent::ToolCall {
+            summary: summary.clone(),
+        });
     }
 
+    let tool_started = Instant::now();
     let result = tools::run(&call.name, &call.arguments).await;
+    let (ok, error) = parse_tool_result_status(&result);
+    let _ = events.send(StreamEvent::ToolResult {
+        summary: summary.clone(),
+        ok,
+        elapsed_ms: tool_started.elapsed().as_millis(),
+        error,
+    });
 
     // When the user already reviewed the diff in the approval preview, skip the
     // post-run FileOp so the same diff isn't printed twice.
@@ -250,6 +279,18 @@ async fn dispatch_tool(
     }
 
     result
+}
+
+fn parse_tool_result_status(result: &str) -> (bool, Option<String>) {
+    let Ok(json) = serde_json::from_str::<Value>(result) else {
+        return (true, None);
+    };
+    let ok = json.get("ok").and_then(Value::as_bool).unwrap_or(true);
+    let error = json
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    (ok, error)
 }
 
 // ── File-op diff helpers ──────────────────────────────────────────────────────
@@ -1047,5 +1088,18 @@ mod tests {
             "The project is a Rust CLI with an npm wrapper."
         ));
         assert!(!looks_like_unfinished_tool_intent(""));
+    }
+
+    #[test]
+    fn parses_tool_result_status() {
+        assert_eq!(parse_tool_result_status(r#"{"ok":true}"#), (true, None));
+        assert_eq!(
+            parse_tool_result_status(r#"{"ok":false,"error":"boom"}"#),
+            (false, Some("boom".to_string()))
+        );
+        assert_eq!(
+            parse_tool_result_status(r#"{"content":"no explicit ok"}"#),
+            (true, None)
+        );
     }
 }

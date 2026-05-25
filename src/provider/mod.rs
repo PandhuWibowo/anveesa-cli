@@ -112,12 +112,21 @@ pub enum ToolConfirmPreview {
 /// Events streamed from a provider back to the renderer, which owns the terminal.
 #[derive(Debug)]
 pub enum StreamEvent {
+    /// Durable progress/status message for long waits between model/tool phases.
+    Status { message: String },
     /// A chunk of assistant text to display as it arrives.
     Token(String),
     /// Final token accounting for the turn.
     Usage(Usage),
     /// A read-only tool is running. Used to make multi-round inspection visible.
     ToolCall { summary: String },
+    /// A tool finished running. Used to show explicit success/failure after approval.
+    ToolResult {
+        summary: String,
+        ok: bool,
+        elapsed_ms: u128,
+        error: Option<String>,
+    },
     /// A write/run tool needs the user's approval. The renderer shows the
     /// preview, prompts for a decision, and sends it back through the reply channel.
     Confirm {

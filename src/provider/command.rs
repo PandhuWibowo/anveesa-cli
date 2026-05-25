@@ -37,6 +37,10 @@ pub async fn ask(
         command.stdin(Stdio::piped());
     }
 
+    let _ = events.send(StreamEvent::Status {
+        message: format!("Running command provider `{}`", config.command),
+    });
+
     let mut child = command.spawn().with_context(|| {
         format!(
             "failed to spawn command provider '{}' at {}",
