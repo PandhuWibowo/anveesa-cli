@@ -16,6 +16,7 @@ use clap::{CommandFactory, Parser};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+#[cfg(target_os = "macos")]
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 use crate::{
@@ -968,11 +969,13 @@ impl PromptBuffer {
     }
 }
 
+#[cfg(unix)]
 struct RawPromptMode {
     fd: i32,
     saved: libc::termios,
 }
 
+#[cfg(unix)]
 impl RawPromptMode {
     fn enter() -> Result<Self> {
         let fd = libc::STDIN_FILENO;
@@ -1001,6 +1004,7 @@ impl RawPromptMode {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RawPromptMode {
     fn drop(&mut self) {
         print!("\x1b[?2004l");
@@ -1009,6 +1013,16 @@ impl Drop for RawPromptMode {
         unsafe {
             libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.saved);
         }
+    }
+}
+
+#[cfg(not(unix))]
+struct RawPromptMode;
+
+#[cfg(not(unix))]
+impl RawPromptMode {
+    fn enter() -> Result<Self> {
+        Ok(Self)
     }
 }
 

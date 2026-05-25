@@ -668,7 +668,7 @@ async fn stream_response(
 
     loop {
         let chunk_result = response.chunk().await;
-        
+
         match chunk_result {
             Ok(Some(chunk)) => {
                 consecutive_errors = 0; // Reset error counter on successful read
@@ -689,7 +689,10 @@ async fn stream_response(
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                     // Log the error but don't fail the whole request
-                    eprintln!("\n[warning: stream interrupted after {} consecutive errors]", consecutive_errors);
+                    eprintln!(
+                        "\n[warning: stream interrupted after {} consecutive errors]",
+                        consecutive_errors
+                    );
                     break;
                 }
                 // Try to continue reading - transient network hiccups happen
