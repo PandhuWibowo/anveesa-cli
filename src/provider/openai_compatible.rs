@@ -105,7 +105,10 @@ pub async fn ask(
                 usage_requested = false;
                 continue;
             }
-            bail!("provider '{provider_name}' returned HTTP {status}: {response_body}");
+            bail!(
+                "provider '{provider_name}' HTTP {status}: {}",
+                extract_api_error(&response_body)
+            );
         }
 
         let mut state = StreamState::default();
@@ -1015,6 +1018,49 @@ fn is_tool_parameter_error(body: &str) -> bool {
 fn is_stream_options_error(body: &str) -> bool {
     let lower = body.to_lowercase();
     lower.contains("stream_options") || lower.contains("include_usage")
+}
+
+/// Extract a concise, human-readable error message from a provider HTTP error body.
+/// Parses `{"error":{"message":"..."}}`, strips verbose class prefixes (e.g. litellm.*),
+/// takes only the first line, and truncates to 120 chars.
+fn extract_api_error(body: &str) -> String {
+    // Try to pull error.message out of the JSON
+    let extracted = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        });
+
+    let raw = extracted.as_deref().unwrap_or(body);
+
+    // First line only
+    let line = raw.lines().next().unwrap_or(raw).trim();
+
+    // Strip a leading "Namespace.ErrorClass: " or "ClassName: " prefix once
+    // (covers litellm.BadRequestError, OpenAIException, etc.)
+    let stripped = if let Some(colon) = line.find(": ") {
+        let prefix = &line[..colon];
+        if !prefix.is_empty()
+            && prefix
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
+        {
+            line[colon + 2..].trim_start()
+        } else {
+            line
+        }
+    } else {
+        line
+    };
+
+    if stripped.len() > 120 {
+        format!("{}…", &stripped[..120])
+    } else {
+        stripped.to_string()
+    }
 }
 
 #[cfg(test)]
