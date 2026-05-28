@@ -70,7 +70,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
 
 async fn run_interactive(options: AskOptions) -> Result<()> {
     let config = AppConfig::load()?;
-    let provider_name = config
+    let mut provider_name = config
         .provider_name(options.provider.as_deref())?
         .to_string();
     let provider = config
@@ -78,7 +78,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         .get(&provider_name)
         .with_context(|| format!("unknown provider '{provider_name}'"))?;
     let tools_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
-    let images_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
+    let mut images_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
     let model = options
         .model
         .clone()
@@ -91,13 +91,15 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         ApprovalPolicy::Prompt
     };
 
-    let session_options = AskOptions {
+    let mut session_options = AskOptions {
         provider: Some(provider_name.clone()),
         model,
         system: options.system,
         stdin: false,
         yes: options.yes,
     };
+
+    let mut accumulated_usage = Usage::default();
 
     let session_path = repl_session_path();
     let mut history = session_path
@@ -153,14 +155,87 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 if let Some(path) = &session_path {
                     let _ = fs::remove_file(path);
                 }
-                println!("context cleared; memory reset");
+                if is_tty {
+                    println!("\x1b[2m  Conversation cleared.\x1b[0m");
+                } else {
+                    println!("conversation cleared");
+                }
+                continue;
+            }
+            "/help" => {
+                print_help_inline(is_tty);
+                continue;
+            }
+            "/status" => {
+                print_status_inline(
+                    is_tty,
+                    &provider_name,
+                    session_options.model.as_deref(),
+                    &cwd,
+                    history.len() / 2,
+                    &accumulated_usage,
+                );
+                continue;
+            }
+            s if s.starts_with("/model") => {
+                let arg = s.strip_prefix("/model").unwrap().trim();
+                if arg.is_empty() {
+                    let current = session_options.model.as_deref().unwrap_or("(provider default)");
+                    if is_tty {
+                        println!("\x1b[2m  model: {current}\x1b[0m");
+                    } else {
+                        println!("model: {current}");
+                    }
+                } else {
+                    session_options.model = Some(arg.to_string());
+                    if is_tty {
+                        println!("\x1b[2m  Switched to model: {arg}\x1b[0m");
+                    } else {
+                        println!("switched model: {arg}");
+                    }
+                }
+                continue;
+            }
+            s if s.starts_with("/provider") => {
+                let arg = s.strip_prefix("/provider").unwrap().trim();
+                if arg.is_empty() {
+                    if is_tty {
+                        println!("\x1b[2m  provider: {provider_name}  model: {}\x1b[0m",
+                            session_options.model.as_deref().unwrap_or("(default)"));
+                    } else {
+                        println!("provider: {provider_name}");
+                    }
+                } else if !config.providers.contains_key(arg) {
+                    if is_tty {
+                        eprintln!("\x1b[1;31m✗\x1b[0m unknown provider '{arg}' — run: anveesa providers");
+                    } else {
+                        eprintln!("error: unknown provider '{arg}'");
+                    }
+                } else {
+                    let new_cfg = config.providers.get(arg).unwrap();
+                    images_available = matches!(new_cfg, ProviderConfig::OpenAiCompatible(_));
+                    // Reset model to new provider's default
+                    session_options.model = new_cfg.default_model().map(str::to_string);
+                    provider_name = arg.to_string();
+                    session_options.provider = Some(arg.to_string());
+                    let model_display = session_options.model.as_deref().unwrap_or("(default)");
+                    if is_tty {
+                        println!("\x1b[2m  Switched to provider: {arg}  model: {model_display}\x1b[0m");
+                    } else {
+                        println!("switched provider: {arg}  model: {model_display}");
+                    }
+                }
                 continue;
             }
             _ => {}
         }
         if let Some(path) = parse_attach_command(&prompt) {
             if !images_available {
-                eprintln!("error: image attachments require an openai-compatible provider");
+                if is_tty {
+                    eprintln!("\x1b[1;31m✗\x1b[0m image attachments require an openai-compatible provider");
+                } else {
+                    eprintln!("error: image attachments require an openai-compatible provider");
+                }
                 continue;
             }
 
@@ -168,9 +243,19 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 Ok(image) => {
                     last_image_fp = Some(image_fingerprint(&image));
                     pending_image = Some(image);
-                    eprintln!("\x1b[90m  [image attached for the next message]\x1b[0m");
+                    if is_tty {
+                        eprintln!("\x1b[2m  Image attached.\x1b[0m");
+                    } else {
+                        eprintln!("image attached");
+                    }
                 }
-                Err(error) => eprintln!("error: {error:#}"),
+                Err(error) => {
+                    if is_tty {
+                        eprintln!("\x1b[1;31m✗\x1b[0m {error:#}");
+                    } else {
+                        eprintln!("error: {error:#}");
+                    }
+                }
             }
             continue;
         }
@@ -196,7 +281,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             None
         };
         if is_tty && image.is_some() {
-            eprintln!("\x1b[90m  [📎 screenshot from clipboard attached]\x1b[0m");
+            eprintln!("\x1b[2m  Screenshot from clipboard attached.\x1b[0m");
         }
 
         match ask_streaming(
@@ -213,6 +298,13 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         {
             Ok(result) => {
                 println!();
+                if let Some(u) = result.usage {
+                    accumulated_usage.prompt_tokens += u.prompt_tokens;
+                    accumulated_usage.completion_tokens += u.completion_tokens;
+                    accumulated_usage.total_tokens += u.total_tokens;
+                    accumulated_usage.cache_read_tokens += u.cache_read_tokens;
+                    accumulated_usage.cache_write_tokens += u.cache_write_tokens;
+                }
                 history.push(ChatMessage::user(prompt));
                 history.push(ChatMessage::assistant(result.text));
                 if let Some(path) = &session_path {
@@ -226,7 +318,11 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 }
             }
             Err(error) => {
-                eprintln!("error: {error:#}");
+                if is_tty {
+                    eprintln!("\x1b[1;31m✗\x1b[0m {error:#}");
+                } else {
+                    eprintln!("error: {error:#}");
+                }
                 println!();
                 history.push(ChatMessage::user(prompt));
                 history.push(ChatMessage::assistant(format!(
@@ -326,13 +422,13 @@ async fn render_stream(
     let mut usage: Option<Usage> = None;
     let mut plan_tasks: Vec<String> = vec![];
     let mut plan_done: Vec<bool> = vec![];
-    let mut status_message = "Waiting for provider response".to_string();
+    let mut status_message = "Waiting for response".to_string();
 
     static TIPS: &[&str] = &[
-        "Tip: type /clear to reset context",
-        "Tip: copy an image, then type /attach",
-        "Tip: use --yes to auto-approve file edits",
-        "Tip: type /exit to leave the session",
+        "/clear  reset context",
+        "/attach  clipboard image",
+        "/exit  leave session",
+        "--yes  auto-approve edits",
     ];
 
     loop {
@@ -386,9 +482,9 @@ async fn render_stream(
                     }
                     print_tool_result(&summary, ok, elapsed_ms, error.as_deref(), spinner);
                     status_message = if ok {
-                        "Waiting for the model to continue".to_string()
+                        "Continuing".to_string()
                     } else {
-                        "Waiting for the model to handle the tool failure".to_string()
+                        "Handling tool error".to_string()
                     };
                     first_token = true;
                     frame = 0;
@@ -406,16 +502,16 @@ async fn render_stream(
                     });
                     match decision {
                         ApprovalDecision::AllowOnce => {
-                            print_status("Approved; applying action", spinner);
-                            status_message = "Applying approved action".to_string();
+                            print_status("Applying action", spinner);
+                            status_message = "Applying action".to_string();
                         }
                         ApprovalDecision::AllowForTurn => {
-                            print_status("Approved all actions for this turn; applying action", spinner);
-                            status_message = "Applying approved action".to_string();
+                            print_status("Applying action (all approved for this turn)", spinner);
+                            status_message = "Applying action".to_string();
                         }
                         ApprovalDecision::Deny => {
-                            print_status("Declined action; returning decision to model", spinner);
-                            status_message = "Waiting for the model to continue".to_string();
+                            print_status("Action declined", spinner);
+                            status_message = "Continuing".to_string();
                         }
                     }
                     let _ = reply.send(decision);
@@ -504,7 +600,7 @@ async fn render_stream(
     {
         if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
             eprintln!(
-                "[tokens: {} in / {} out / {} total | cache: {} read / {} write]",
+                "\x1b[2m  {} in · {} out · {} total  (cache: {} hit · {} write)\x1b[0m",
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 usage.total_tokens,
@@ -513,7 +609,7 @@ async fn render_stream(
             );
         } else {
             eprintln!(
-                "[tokens: {} in / {} out / {} total]",
+                "\x1b[2m  {} in · {} out · {} total\x1b[0m",
                 usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
             );
         }
@@ -810,21 +906,108 @@ fn one_shot_policy(auto_approve: bool, stdin_is_terminal: bool) -> ApprovalPolic
     }
 }
 
+fn print_status_inline(
+    is_tty: bool,
+    provider: &str,
+    model: Option<&str>,
+    cwd: &std::path::Path,
+    turns: usize,
+    usage: &Usage,
+) {
+    let model_display = model.unwrap_or("(default)");
+    let short_cwd = std::env::var("HOME")
+        .map(|h| cwd.display().to_string().replacen(&h, "~", 1))
+        .unwrap_or_else(|_| cwd.display().to_string());
+
+    if !is_tty {
+        println!("provider: {provider}  model: {model_display}");
+        println!("cwd: {short_cwd}");
+        println!("turns: {turns}");
+        if usage.total_tokens > 0 {
+            println!(
+                "tokens: {} in / {} out / {} total",
+                usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+            );
+        }
+        return;
+    }
+
+    println!();
+    println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
+    println!(
+        "  \x1b[2mprovider\x1b[0m  \x1b[1m{provider}\x1b[0m  \x1b[2m·\x1b[0m  \x1b[1m{model_display}\x1b[0m"
+    );
+    println!("  \x1b[2mcwd     \x1b[0m  \x1b[2m{short_cwd}\x1b[0m");
+    println!("  \x1b[2mturns   \x1b[0m  {turns}");
+    if usage.total_tokens > 0 {
+        println!(
+            "  \x1b[2mtokens  \x1b[0m  {} in  ·  {} out  ·  {} total",
+            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+        );
+        if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
+            println!(
+                "  \x1b[2mcache   \x1b[0m  {} read  ·  {} write",
+                usage.cache_read_tokens, usage.cache_write_tokens
+            );
+        }
+    }
+    println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
+    println!();
+}
+
+fn print_help_inline(is_tty: bool) {
+    if !is_tty {
+        println!("commands: /clear, /attach [path], /exit, /quit, /help");
+        println!("images: copy an image (Cmd+C), then send a message to auto-attach it");
+        return;
+    }
+    println!();
+    println!("\x1b[2m  Commands\x1b[0m");
+    println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
+    println!("  \x1b[1;32m/status\x1b[0m             provider, model, turns, token usage");
+    println!("  \x1b[1;32m/model\x1b[0m \x1b[2m[name]\x1b[0m      switch or show current model");
+    println!("  \x1b[1;32m/provider\x1b[0m \x1b[2m[name]\x1b[0m   switch or show current provider");
+    println!("  \x1b[1;32m/clear\x1b[0m              reset conversation");
+    println!("  \x1b[1;32m/attach\x1b[0m \x1b[2m[path]\x1b[0m     attach image from file or clipboard");
+    println!("  \x1b[1;32m/exit\x1b[0m, \x1b[1;32m/quit\x1b[0m       leave the session");
+    println!("  \x1b[1;32m/help\x1b[0m               show this message");
+    println!();
+    println!("\x1b[2m  Images\x1b[0m");
+    println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
+    println!("  Cmd+C an image, then send a message — it attaches automatically.");
+    println!("  Or use \x1b[1;32m/attach\x1b[0m \x1b[2mpath/to/file.png\x1b[0m for a specific file.");
+    println!("  For broadest clipboard support: \x1b[2mbrew install pngpaste\x1b[0m");
+    println!();
+}
+
 fn list_providers() -> Result<()> {
     let config = AppConfig::load()?;
-    println!("providers:");
-    for (name, provider) in config.providers {
-        let default_marker = if config.default_provider.as_deref() == Some(name.as_str()) {
-            " default"
+    let is_tty = io::stdout().is_terminal();
+
+    if !is_tty {
+        for (name, provider) in &config.providers {
+            let is_default = config.default_provider.as_deref() == Some(name.as_str());
+            let model = provider.default_model().unwrap_or("-");
+            println!("{}  {name}  {model}  {}", if is_default { "*" } else { " " }, provider.kind());
+        }
+        return Ok(());
+    }
+
+    println!();
+    for (name, provider) in &config.providers {
+        let is_default = config.default_provider.as_deref() == Some(name.as_str());
+        let model = provider.default_model().unwrap_or("-");
+        let default_tag = if is_default {
+            "  \x1b[1;32m●  default\x1b[0m"
         } else {
             ""
         };
-        let model = provider.default_model().unwrap_or("-");
         println!(
-            "- {name} ({kind}, model: {model}){default_marker}",
-            kind = provider.kind()
+            "  \x1b[1m{name}\x1b[0m  \x1b[2m{model}  {}\x1b[0m{default_tag}",
+            provider.kind()
         );
     }
+    println!();
     Ok(())
 }
 
@@ -893,47 +1076,19 @@ fn print_session_header(
     _turns: usize,
     _has_workspace_context: bool,
     _tools_available: bool,
-    policy: ApprovalPolicy,
+    _policy: ApprovalPolicy,
     resumed: bool,
 ) {
-    fn pad_to(s: &str, w: usize) -> String {
-        let n = s.chars().count();
-        if n >= w {
-            s.chars().take(w).collect()
-        } else {
-            format!("{}{}", s, " ".repeat(w - n))
-        }
-    }
-    fn center_in(s: &str, w: usize) -> String {
-        let n = s.chars().count();
-        if n >= w {
-            return s.chars().take(w).collect();
-        }
-        let pad = w - n;
-        let lp = pad / 2;
-        format!("{}{}{}", " ".repeat(lp), s, " ".repeat(pad - lp))
-    }
-    fn trunc(s: &str, max: usize) -> String {
-        let v: Vec<char> = s.chars().collect();
-        if v.len() <= max {
-            return s.to_string();
-        }
-        let mut r: String = v[..max - 1].iter().collect();
-        r.push('…');
-        r
-    }
-
     let is_tty = io::stdout().is_terminal();
     let version = env!("CARGO_PKG_VERSION");
 
-    // Fit the box to the actual terminal width
-    let total: usize = if is_tty {
-        term_width().clamp(80, 220)
-    } else {
-        90
-    };
-    let left_w: usize = 38;
-    let right_w: usize = total.saturating_sub(left_w + 3);
+    if !is_tty {
+        let tag = if resumed { " (resumed)" } else { "" };
+        println!("anveesa v{version}{tag} | {provider} · {model}");
+        return;
+    }
+
+    let width = term_width().clamp(50, 220);
 
     let cwd = std::env::current_dir()
         .ok()
@@ -945,101 +1100,32 @@ fn print_session_header(
         })
         .unwrap_or_else(|| "~".to_string());
 
-    let rs = if is_tty { "\x1b[0m" } else { "" };
-    let br = if is_tty { "\x1b[36m" } else { "" }; // cyan  — border
-    let bg = if is_tty { "\x1b[1;32m" } else { "" }; // bold green — section headers
-    let cy = if is_tty { "\x1b[36m" } else { "" }; // cyan  — body text
-    let gr = if is_tty { "\x1b[32m" } else { "" }; // green — robot art (distinct from border)
-    let dm = if is_tty { "\x1b[2m" } else { "" }; // dim   — secondary info
-
-    let row = |lp: &str, lc: &str, rp: &str, rc: &str| {
-        let l = pad_to(lp, left_w);
-        let r = pad_to(rp, right_w);
-        let ld = if is_tty && !lc.is_empty() {
-            format!("{lc}{l}{rs}")
-        } else {
-            l
-        };
-        let rd = if is_tty && !rc.is_empty() {
-            format!("{rc}{r}{rs}")
-        } else {
-            r
-        };
-        println!("{br}│{rs}{ld}{br}│{rs}{rd}{br}│{rs}");
-    };
-
-    // Top border: ┌── Anveesa vX.Y.Z ─────...─┐  (full terminal width)
-    let title = format!(" Anveesa v{version} ");
-    let tlen = title.chars().count();
-    let dashes_str = "─".repeat(total.saturating_sub(4 + tlen));
-    println!("{br}┌──{title}{dashes_str}┐{rs}");
-
-    let greeting = if resumed { "Welcome back!" } else { "Hello!" };
-    let info = trunc(&format!("  {provider}  ·  {model}"), left_w);
-    let cwd_line = trunc(&format!("  {cwd}"), left_w);
-
-    // Robot art — pure ASCII so width is always 1 char per glyph, no box-char conflict
-    // Each string is exactly 11 chars wide
-    let art = [
-        "  .------. ", // head top
-        "  | o  o | ", // eyes
-        "  |  __  | ", // mouth
-        "  '------' ", // head bottom
-        "    |  |   ", // legs
-    ];
-
-    let approve = if matches!(policy, ApprovalPolicy::Prompt) {
-        "  y/a      approve tools"
-    } else {
-        ""
-    };
-
-    row("", "", "", "");
-    row(
-        &center_in(greeting, left_w),
-        bg,
-        "  Tips for getting started",
-        bg,
-    );
-    row("", "", "  /clear   reset context", cy);
-    row(
-        &center_in(art[0], left_w),
-        gr,
-        "  /exit or /quit to leave",
-        cy,
-    );
-    row(
-        &center_in(art[1], left_w),
-        gr,
-        "  anveesa ask <q>  one-shot",
-        cy,
-    );
-    row(&center_in(art[2], left_w), gr, "", "");
-
-    // Right-panel section separator
-    {
-        let l = pad_to(&center_in(art[3], left_w), left_w);
-        let sep = "─".repeat(right_w);
-        let l_colored = if is_tty { format!("{gr}{l}{rs}") } else { l };
-        let rd = if is_tty {
-            format!("{dm}{sep}{rs}")
-        } else {
-            sep
-        };
-        println!("{br}│{rs}{l_colored}{br}│{rs}{rd}{br}│{rs}");
+    fn trunc_to(s: &str, max: usize) -> String {
+        let v: Vec<char> = s.chars().collect();
+        if v.len() <= max {
+            return s.to_string();
+        }
+        let mut r: String = v[..max.saturating_sub(1)].iter().collect();
+        r.push('…');
+        r
     }
 
-    row(&center_in(art[4], left_w), gr, "", "");
-    row("", "", "  Commands", bg);
-    row(&info, dm, "  /clear   reset memory", cy);
-    row(&cwd_line, dm, "  /exit    quit session", cy);
-    row("", "", "  /attach  attach image", cy);
-    row("", "", approve, cy);
-    row("", "", "", "");
+    // ── anveesa v0.2.8 [· Welcome back!] ─────────────────
+    let greeting = if resumed { " · Welcome back!" } else { "" };
+    let title = format!(" anveesa v{version}{greeting} ");
+    let title_len = title.chars().count();
+    let right_dashes = width.saturating_sub(2 + title_len);
+    println!(
+        "\x1b[90m──\x1b[0m\x1b[1;32m{title}\x1b[0m\x1b[90m{}\x1b[0m",
+        "─".repeat(right_dashes)
+    );
 
-    // Bottom border (full terminal width)
-    let bot = "─".repeat(total.saturating_sub(2));
-    println!("{br}└{bot}┘{rs}");
+    //   provider · model · ~/cwd
+    let info = trunc_to(&format!("  {provider} · {model} · {cwd}"), width);
+    println!("\x1b[2m{info}\x1b[0m");
+
+    //   /help for commands
+    println!("\x1b[2m  /help for commands\x1b[0m");
     println!();
 }
 
@@ -1425,7 +1511,7 @@ fn attach_image(path: Option<&str>) -> Result<ImageAttachment> {
     match path {
         Some(path) => load_image_file(Path::new(path)),
         None => read_clipboard_image().context(
-            "no supported image found in clipboard; copy an image first or use /attach path/to/image.png",
+            "no image found in clipboard — copy an image first, or for broader format support: brew install pngpaste",
         ),
     }
 }
@@ -1484,20 +1570,44 @@ fn grab_clipboard_image() -> Option<ImageAttachment> {
 /// Try to grab an image from the system clipboard and return it base64-encoded.
 #[cfg(target_os = "macos")]
 fn read_clipboard_image() -> Result<ImageAttachment> {
-    if let Ok(bytes) = read_clipboard_class_bytes("PNGf", "png") {
+    // pngpaste handles all modern macOS clipboard formats (install: brew install pngpaste)
+    if let Ok(bytes) = read_clipboard_via_pngpaste() {
         return Ok(ImageAttachment {
             mime: "image/png".to_string(),
             data: BASE64.encode(&bytes),
         });
     }
 
+    // JXA via NSPasteboard: catches public.png (browsers, web apps)
+    if let Ok(bytes) = read_clipboard_via_jxa("public.png") {
+        return Ok(ImageAttachment {
+            mime: "image/png".to_string(),
+            data: BASE64.encode(&bytes),
+        });
+    }
+
+    // JXA via NSPasteboard: catches public.tiff (screenshots, Preview, most macOS apps)
+    if let Ok(tiff) = read_clipboard_via_jxa("public.tiff") {
+        let png = convert_tiff_to_png(&tiff)?;
+        return Ok(ImageAttachment {
+            mime: "image/png".to_string(),
+            data: BASE64.encode(&png),
+        });
+    }
+
+    // Legacy AppleScript class-code fallback
+    if let Ok(bytes) = read_clipboard_class_bytes("PNGf", "png") {
+        return Ok(ImageAttachment {
+            mime: "image/png".to_string(),
+            data: BASE64.encode(&bytes),
+        });
+    }
     if let Ok(bytes) = read_clipboard_class_bytes("JPEG", "jpg") {
         return Ok(ImageAttachment {
             mime: "image/jpeg".to_string(),
             data: BASE64.encode(&bytes),
         });
     }
-
     if let Ok(tiff) = read_clipboard_class_bytes("TIFF", "tiff") {
         let png = convert_tiff_to_png(&tiff)?;
         return Ok(ImageAttachment {
@@ -1506,7 +1616,53 @@ fn read_clipboard_image() -> Result<ImageAttachment> {
         });
     }
 
-    bail!("clipboard does not contain PNG, JPEG, or TIFF image data")
+    bail!("no image found in clipboard — copy an image first, or use: /attach path/to/image.png")
+}
+
+/// Read clipboard image using pngpaste (brew install pngpaste) — most reliable option.
+#[cfg(target_os = "macos")]
+fn read_clipboard_via_pngpaste() -> Result<Vec<u8>> {
+    let tmp = std::env::temp_dir().join(format!("anveesa_pp_{}.png", std::process::id()));
+    let status = std::process::Command::new("pngpaste")
+        .arg(&tmp)
+        .status()
+        .context("pngpaste not available")?;
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        bail!("pngpaste: no image in clipboard");
+    }
+    let bytes = fs::read(&tmp)?;
+    let _ = fs::remove_file(&tmp);
+    if bytes.len() < 8 {
+        bail!("empty image from pngpaste");
+    }
+    Ok(bytes)
+}
+
+/// Read clipboard image via JXA + NSPasteboard using a modern UTI type.
+/// This correctly handles images copied from browsers and web apps.
+#[cfg(target_os = "macos")]
+fn read_clipboard_via_jxa(pb_type: &str) -> Result<Vec<u8>> {
+    let script = format!(
+        "ObjC.import('AppKit'); \
+         var d = $.NSPasteboard.generalPasteboard.dataForType('{pb_type}'); \
+         d && d.length > 0 ? d.base64EncodedStringWithOptions(0).js : 'none'"
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-l")
+        .arg("JavaScript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .context("osascript not available")?;
+    let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || result == "none" || result.is_empty() {
+        bail!("no {pb_type} data in clipboard");
+    }
+    let clean: String = result.chars().filter(|c| !c.is_whitespace()).collect();
+    BASE64
+        .decode(clean.as_bytes())
+        .context("failed to decode clipboard image data from JXA")
 }
 
 #[cfg(target_os = "macos")]
