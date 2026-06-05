@@ -424,6 +424,10 @@ impl ProviderConfig {
 pub struct OpenAiCompatibleProviderConfig {
     pub base_url: String,
 
+    /// Inline API key. Prefer `api_key_env` to avoid storing secrets in the config file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
 
@@ -477,6 +481,7 @@ fn insert_openai_provider(
         name.to_string(),
         ProviderConfig::OpenAiCompatible(OpenAiCompatibleProviderConfig {
             base_url: base_url.to_string(),
+            api_key: None,
             api_key_env: api_key_env.map(str::to_string),
             default_model: None,
             headers: BTreeMap::new(),

@@ -643,9 +643,17 @@ fn build_headers(config: &OpenAiCompatibleProviderConfig, prompt_cache: bool) ->
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-    if let Some(api_key_env) = &config.api_key_env {
-        let api_key = std::env::var(api_key_env)
-            .with_context(|| format!("environment variable {api_key_env} is required"))?;
+    let resolved_key = if let Some(key) = &config.api_key {
+        Some(key.clone())
+    } else if let Some(env_var) = &config.api_key_env {
+        Some(
+            std::env::var(env_var)
+                .with_context(|| format!("environment variable {env_var} is required"))?,
+        )
+    } else {
+        None
+    };
+    if let Some(api_key) = resolved_key {
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {api_key}"))
