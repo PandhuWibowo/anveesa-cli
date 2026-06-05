@@ -1389,6 +1389,24 @@ impl PromptBuffer {
             self.segments.pop();
         }
     }
+
+    /// Ctrl+U / Cmd+Delete — erase the entire line.
+    fn clear_all(&mut self) {
+        self.full.clear();
+        self.display.clear();
+        self.segments.clear();
+    }
+
+    /// Ctrl+W / Option+Delete — erase the last word (whitespace-delimited).
+    fn pop_word(&mut self) {
+        // Trim trailing whitespace first, then remove up to the previous whitespace boundary.
+        while self.full.ends_with(' ') {
+            self.pop_last();
+        }
+        while !self.full.is_empty() && !self.full.ends_with(' ') {
+            self.pop_last();
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1474,7 +1492,18 @@ fn read_prompt_line(label: &str, width: usize, paste_count: &mut usize) -> Resul
             }
             4 if buffer.is_empty() => return Ok(PromptRead::Eof),
             8 | 127 => {
+                // Backspace
                 buffer.pop_last();
+                display_rows = redraw_prompt_line(label, &buffer.display, display_rows, width)?;
+            }
+            21 => {
+                // Ctrl+U / Cmd+Delete — erase entire line
+                buffer.clear_all();
+                display_rows = redraw_prompt_line(label, &buffer.display, display_rows, width)?;
+            }
+            23 => {
+                // Ctrl+W / Option+Delete — erase last word
+                buffer.pop_word();
                 display_rows = redraw_prompt_line(label, &buffer.display, display_rows, width)?;
             }
             0x1b => {
