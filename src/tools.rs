@@ -1,15 +1,23 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::OnceLock,
-    time::Duration,
+    sync::{Mutex, OnceLock},
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+// ── File read cache ───────────────────────────────────────────────────────────
+// Keyed by (absolute path, mtime) → content. Lives for the process lifetime.
+static FILE_CACHE: OnceLock<Mutex<HashMap<(PathBuf, SystemTime), String>>> = OnceLock::new();
+
+fn file_cache() -> &'static Mutex<HashMap<(PathBuf, SystemTime), String>> {
+    FILE_CACHE.get_or_init(Default::default)
+}
 
 const MAX_DIR_ENTRIES: usize = 120;
 const MAX_SEARCH_RESULTS: usize = 80;
@@ -52,6 +60,10 @@ Only call tools for information you do not yet have.",
 Stop immediately, report the exact error to the user, and wait for their input.",
     );
     text.push_str(" Never request or expose secrets such as API keys, SSH keys, or .env files.");
+    text.push_str(
+        " Use save_note/read_notes to persist important facts, decisions, or learnings \
+beyond this conversation — notes survive across sessions.",
+    );
     text
 }
 
@@ -62,6 +74,7 @@ pub fn is_write_tool(name: &str) -> bool {
         "create_dir" | "write_file" | "edit_file" | "run_command"
         | "delete_file" | "move_file" | "copy_file" | "patch_file"
         | "git_commit" | "git_stash" | "git_branch"
+        | "save_note" | "delete_note"
     )
 }
 
@@ -105,8 +118,12 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
             else { "git branch".to_string() }
         }
         "git_commit"  => format!("git commit {}", field("message")),
-        "patch_file"  => format!("patch file {}", field("path")),
-        "delete_file" => format!("delete {}", field("path")),
+        "patch_file"   => format!("patch file {}", field("path")),
+        "delete_file"  => format!("delete {}", field("path")),
+        "save_note"    => format!("save note `{}`", field("key")),
+        "read_notes"   => format!("read notes{}", if field("key").is_empty() { String::new() } else { format!(" `{}`", field("key")) }),
+        "search_notes" => format!("search notes `{}`", field("query")),
+        "delete_note"  => format!("delete note `{}`", field("key")),
         "move_file"   => format!("move {} → {}", field("from"), field("to")),
         "copy_file"   => format!("copy {} → {}", field("from"), field("to")),
         "create_dir"  => format!("create directory {}", field("path")),
@@ -319,10 +336,67 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "read_notes",
+                "description": "Read your persistent notes. Omit key to list all notes with previews.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "description": "Note key to read. Omit to list all." }
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "search_notes",
+                "description": "Search text across all saved notes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Text to search for." }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }),
     ];
 
     if include_write {
         definitions.extend([
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "save_note",
+                    "description": "Save a persistent note that survives across sessions. Use to remember facts, decisions, learnings, or preferences.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key":     { "type": "string",  "description": "Short identifier (e.g. 'project-decisions', 'bug-fixes')." },
+                            "content": { "type": "string",  "description": "Markdown content to save." },
+                            "append":  { "type": "boolean", "description": "Append to existing note instead of replacing. Default false." }
+                        },
+                        "required": ["key", "content"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "delete_note",
+                    "description": "Delete a saved note.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string", "description": "Note key to delete." }
+                        },
+                        "required": ["key"]
+                    }
+                }
+            }),
             json!({
                 "type": "function",
                 "function": {
@@ -519,8 +593,12 @@ pub async fn run(name: &str, arguments: &str) -> String {
         "git_stash"   => git_stash(arguments).await,
         "git_branch"  => git_branch(arguments).await,
         "git_commit"  => git_commit(arguments).await,
-        "patch_file"  => patch_file(arguments).await,
-        "delete_file" => delete_file(arguments).await,
+        "patch_file"   => patch_file(arguments).await,
+        "delete_file"  => delete_file(arguments).await,
+        "save_note"    => save_note(arguments).await,
+        "read_notes"   => read_notes(arguments).await,
+        "search_notes" => search_notes(arguments).await,
+        "delete_note"  => delete_note(arguments).await,
         "move_file"   => move_file(arguments).await,
         "copy_file"   => copy_file(arguments).await,
         "create_dir"  => create_dir(arguments).await,
@@ -673,8 +751,27 @@ async fn read_file(arguments: &str) -> Result<Value> {
 
     let start_line = args.start_line.unwrap_or(1).max(1);
     let max_lines = args.max_lines.unwrap_or(120).clamp(1, MAX_READ_LINES);
-    let content =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+
+    // Smart cache: if the file hasn't changed since we last read it, use cached content
+    let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let content = if let Some(mtime) = mtime {
+        let cache_key = (path.clone(), mtime);
+        let cached = file_cache().lock().ok().and_then(|c| c.get(&cache_key).cloned());
+        if let Some(c) = cached {
+            c
+        } else {
+            let c = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            if let Ok(mut cache) = file_cache().lock() {
+                // Evict old entry for this path if any
+                cache.retain(|(p, _), _| p != &path);
+                cache.insert(cache_key, c.clone());
+            }
+            c
+        }
+    } else {
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?
+    };
     let lines = content
         .lines()
         .enumerate()
@@ -1386,6 +1483,178 @@ async fn edit_file(arguments: &str) -> Result<Value> {
         "ok": true,
         "path": path.display().to_string(),
         "replacements": 1,
+    }))
+}
+
+// ── persistent memory tools ───────────────────────────────────────────────────
+
+fn notes_dir() -> Result<PathBuf> {
+    let dir = crate::config::config_path()?
+        .parent()
+        .context("no config dir")?
+        .join("notes");
+    fs::create_dir_all(&dir).context("failed to create notes dir")?;
+    Ok(dir)
+}
+
+fn sanitize_key(key: &str) -> String {
+    key.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect::<String>()
+        .to_lowercase()
+}
+
+async fn save_note(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args { key: String, content: String, #[serde(default)] append: bool }
+    let args: Args = parse_args(arguments)?;
+    if args.key.trim().is_empty() { bail!("key is required"); }
+    let path = notes_dir()?.join(sanitize_key(&args.key) + ".md");
+    let content = if args.append && path.exists() {
+        format!("{}\n\n{}", fs::read_to_string(&path).unwrap_or_default().trim_end(), args.content)
+    } else {
+        args.content
+    };
+    fs::write(&path, &content)?;
+    Ok(json!({ "ok": true, "key": args.key, "bytes": content.len() }))
+}
+
+async fn read_notes(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize, Default)]
+    struct Args { #[serde(default)] key: Option<String> }
+    let args: Args = serde_json::from_str(arguments).unwrap_or_default();
+    let dir = notes_dir()?;
+    if let Some(key) = &args.key {
+        let path = dir.join(sanitize_key(key) + ".md");
+        if !path.exists() { bail!("note '{}' not found", key); }
+        let content = fs::read_to_string(&path)?;
+        return Ok(json!({ "ok": true, "key": key, "content": content }));
+    }
+    let mut notes = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
+            let key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let preview = fs::read_to_string(&path).ok()
+                .and_then(|c| c.lines().next().map(|l| l.trim().to_string()))
+                .unwrap_or_default();
+            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            notes.push(json!({ "key": key, "preview": preview, "size_bytes": size }));
+        }
+    }
+    notes.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    Ok(json!({ "ok": true, "count": notes.len(), "notes": notes }))
+}
+
+async fn search_notes(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args { query: String }
+    let args: Args = parse_args(arguments)?;
+    let query = args.query.to_lowercase();
+    let dir = notes_dir()?;
+    let mut results = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            let matching: Vec<&str> = content.lines()
+                .filter(|l| l.to_lowercase().contains(&query))
+                .take(3)
+                .collect();
+            if !matching.is_empty() {
+                let key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                results.push(json!({ "key": key, "matches": matching }));
+            }
+        }
+    }
+    Ok(json!({ "ok": true, "query": args.query, "results": results }))
+}
+
+async fn delete_note(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args { key: String }
+    let args: Args = parse_args(arguments)?;
+    let path = notes_dir()?.join(sanitize_key(&args.key) + ".md");
+    if !path.exists() { bail!("note '{}' not found", args.key); }
+    fs::remove_file(&path)?;
+    Ok(json!({ "ok": true, "key": args.key }))
+}
+
+// ── run_command (streaming variant for live output) ───────────────────────────
+
+/// Streaming run_command: calls `on_line` with each output line as it arrives.
+/// Returns the same JSON as `run_command` but streams progress via the callback.
+pub async fn run_command_with_progress<F>(arguments: &str, mut on_line: F) -> String
+where F: FnMut(String)
+{
+    match run_command_streaming_impl(arguments, &mut on_line).await {
+        Ok(v) => v.to_string(),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }).to_string(),
+    }
+}
+
+async fn run_command_streaming_impl<F>(arguments: &str, on_line: &mut F) -> Result<Value>
+where F: FnMut(String)
+{
+    use tokio::io::AsyncBufReadExt;
+
+    #[derive(Deserialize)]
+    struct Args { command: String, #[serde(default)] timeout_secs: Option<u64> }
+    let args: Args = parse_args(arguments)?;
+    if args.command.trim().is_empty() { bail!("command is empty"); }
+
+    let timeout_secs = args.timeout_secs
+        .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
+        .min(MAX_COMMAND_TIMEOUT_SECS);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+    // Merge stderr into stdout for unified live streaming
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", &format!("({}) 2>&1", args.command)])
+        .stdout(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to spawn command")?;
+
+    let stdout = child.stdout.take().context("no stdout")?;
+    let mut reader = tokio::io::BufReader::new(stdout).lines();
+    let mut all_output = String::new();
+    let mut line_count = 0usize;
+
+    loop {
+        tokio::select! {
+            result = reader.next_line() => {
+                match result? {
+                    Some(line) => {
+                        on_line(line.clone());
+                        all_output.push_str(&line);
+                        all_output.push('\n');
+                        line_count += 1;
+                        if all_output.len() > MAX_COMMAND_OUTPUT {
+                            all_output.push_str("\n...[output truncated]");
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                child.kill().await.ok();
+                bail!("command timed out after {timeout_secs}s ({line_count} lines output)");
+            }
+        }
+    }
+
+    let exit_code = child.wait().await?.code().unwrap_or(-1);
+    Ok(json!({
+        "ok": exit_code == 0,
+        "exit_code": exit_code,
+        "stdout": all_output,
+        "stderr": "",
+        "lines": line_count,
     }))
 }
 

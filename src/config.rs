@@ -453,6 +453,11 @@ pub struct OpenAiCompatibleProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
 
+    /// Lightweight model for read-only tool-reasoning rounds (saves cost).
+    /// e.g. "gpt-4o-mini" while default_model = "gpt-4o"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_model: Option<String>,
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
 
@@ -503,6 +508,7 @@ fn insert_openai_provider(
             api_key: None,
             api_key_env: api_key_env.map(str::to_string),
             default_model: None,
+            fast_model: None,
             headers: BTreeMap::new(),
             prompt_cache: None,
             max_tokens: None,

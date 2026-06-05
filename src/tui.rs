@@ -1027,23 +1027,54 @@ fn render(frame: &mut Frame, app: &mut App) {
     render_status(frame, chunks[3], app);
 }
 
+fn context_window_tokens(model: &str) -> usize {
+    let m = model.to_lowercase();
+    if m.contains("gemini") { 1_000_000 }
+    else if m.contains("claude") { 200_000 }
+    else if m.contains("gpt-4") { 128_000 }
+    else if m.contains("gpt-3.5") { 16_000 }
+    else if m.contains("qwen") || m.contains("deepseek") || m.contains("llama") { 128_000 }
+    else { 128_000 }
+}
+
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let version = env!("CARGO_PKG_VERSION");
+
+    // Token info
     let token_str = if app.mode == Mode::Streaming && !app.streaming_buf.is_empty() {
-        // Live estimate: chars / 4 ≈ tokens
         let live = app.streaming_buf.len() / 4;
-        format!("  → {live}t")
+        format!(" → {live}t")
     } else if app.usage.total_tokens > 0 {
-        format!("  {}↓ {}↑", app.usage.prompt_tokens, app.usage.completion_tokens)
+        format!(" {}↓ {}↑", app.usage.prompt_tokens, app.usage.completion_tokens)
     } else {
         String::new()
     };
+
+    // Context usage bar
+    let ctx_tokens: usize = app.history.iter().map(|m| m.content.len() / 4 + 4).sum::<usize>() + 2000;
+    let ctx_max = context_window_tokens(&app.model);
+    let pct = (ctx_tokens * 100 / ctx_max.max(1)).min(100);
+    let bar_len = 8usize;
+    let filled = (pct * bar_len / 100).min(bar_len);
+    let bar = format!("[{}{}] {}k", "█".repeat(filled), "░".repeat(bar_len - filled), ctx_tokens / 1000);
+    let bar_color = if pct > 80 { Color::Rgb(224, 108, 117) }
+        else if pct > 50 { Color::Rgb(229, 192, 123) }
+        else { Color::Rgb(152, 195, 121) };
+
     let left = format!(" anveesa v{version}{token_str}");
+    let mid = format!("  {bar}  ");
     let right = format!(" {} · {} ", app.provider, app.model);
-    let gap = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
-    let title = format!("{left}{}{right}", " ".repeat(gap));
+    let gap = (area.width as usize)
+        .saturating_sub(left.chars().count() + mid.chars().count() + right.chars().count());
+
+    let line = ratatui::text::Line::from(vec![
+        Span::styled(left, Style::default().fg(Color::Rgb(20, 20, 30))),
+        Span::styled(mid, Style::default().fg(bar_color)),
+        Span::styled(" ".repeat(gap), Style::default()),
+        Span::styled(right, Style::default().fg(Color::Rgb(20, 20, 30))),
+    ]);
     frame.render_widget(
-        Paragraph::new(title).style(Style::default().fg(Color::Rgb(20, 20, 30)).bg(Color::Rgb(97, 175, 239))),
+        Paragraph::new(line).style(Style::default().bg(Color::Rgb(97, 175, 239))),
         area,
     );
 }

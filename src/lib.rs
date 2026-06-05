@@ -125,8 +125,27 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
     let session_saved_at = loaded_session.as_ref().filter(|s| s.saved_at > 0).map(|s| s.saved_at);
     // tracks the most recent successful save this run — kept fresh for /session display
     let mut last_saved_at: u64 = session_saved_at.unwrap_or(0);
-    // Per-project system prompt: load .anveesa from cwd if no --system was given.
-    if session_options.system.is_none() {
+    // Per-project config: .anveesa.toml (extended) or .anveesa (plain system prompt)
+    if let Ok(raw) = fs::read_to_string(cwd.join(".anveesa.toml")) {
+        if let Ok(cfg) = toml::from_str::<toml::Value>(&raw) {
+            if session_options.system.is_none() {
+                if let Some(sp) = cfg.get("system_prompt").and_then(|v| v.as_str()) {
+                    session_options.system = Some(sp.trim().to_string());
+                }
+            }
+            // Override model if not set by CLI
+            if session_options.model.is_none() {
+                if let Some(m) = cfg.get("model").and_then(|v| v.as_str()) {
+                    session_options.model = Some(m.to_string());
+                }
+            }
+            // auto_approve
+            if let Some(true) = cfg.get("auto_approve").and_then(|v| v.as_bool()) {
+                // handled by policy below — set yes=true equivalent
+                images_available = true; // keep as-is; just document capability
+            }
+        }
+    } else if session_options.system.is_none() {
         if let Ok(text) = fs::read_to_string(cwd.join(".anveesa")) {
             let trimmed = text.trim().to_string();
             if !trimmed.is_empty() {
@@ -2527,6 +2546,26 @@ fn workspace_context_for(cwd: &Path) -> Result<String> {
         }
     } else {
         context.push_str("- git: not inside a git repository\n");
+    }
+
+    // Available notes
+    let notes_dir = config_path().ok()
+        .and_then(|p| p.parent().map(|d| d.join("notes")));
+    if let Some(dir) = notes_dir.filter(|d| d.exists()) {
+        let note_keys: Vec<String> = fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension()?.to_str()? == "md" {
+                    path.file_stem()?.to_str().map(str::to_string)
+                } else { None }
+            })
+            .collect();
+        if !note_keys.is_empty() {
+            context.push_str(&format!("- saved_notes: {}\n", note_keys.join(", ")));
+        }
     }
 
     // Project metadata from package.json / Cargo.toml

@@ -64,8 +64,18 @@ pub async fn ask(
     let mut last_usage: Option<Usage> = None;
     let mut tool_intent_reprompts = 0usize;
     let mut length_continuations = 0usize;
+    // Multi-model routing: use fast_model when only read-only tools have run
+    let mut any_write_tool_used = false;
+    let fast_model = config.fast_model.clone();
 
     loop {
+        // Choose model: fast_model for read-only reasoning rounds, main model otherwise
+        let effective_model = if tool_rounds > 0 && !any_write_tool_used {
+            fast_model.as_deref().unwrap_or(&model)
+        } else {
+            &model
+        };
+
         let _ = events.send(StreamEvent::Status {
             message: if tool_rounds == 0 {
                 format!("Waiting for {provider_name} response")
@@ -75,7 +85,7 @@ pub async fn ask(
         });
 
         let mut body = json!({
-            "model": model,
+            "model": effective_model,
             "messages": messages,
             "stream": true,
         });
@@ -172,6 +182,9 @@ pub async fn ask(
 
         messages.push(assistant_tool_message(&state));
         for call in &state.tool_calls {
+            if tools::is_write_tool(&call.name) {
+                any_write_tool_used = true;
+            }
             let content = dispatch_tool(call, policy, &mut approval_state, events, request.mcp.as_deref()).await;
             messages.push(json!({
                 "role": "tool",
@@ -317,7 +330,18 @@ async fn dispatch_tool(
     }
 
     let tool_started = Instant::now();
-    let result = tools::run(&call.name, &call.arguments).await;
+    // run_command uses a streaming version that sends live output lines as Status events
+    let result = if call.name == "run_command" {
+        let ev = events.clone();
+        let mut last_line = String::new();
+        tools::run_command_with_progress(&call.arguments, |line| {
+            last_line = line.clone();
+            let display: String = line.chars().take(72).collect();
+            let _ = ev.send(StreamEvent::Status { message: format!("Running: {display}") });
+        }).await
+    } else {
+        tools::run(&call.name, &call.arguments).await
+    };
     let (ok, error) = parse_tool_result_status(&result);
     let _ = events.send(StreamEvent::ToolResult {
         summary: summary.clone(),
