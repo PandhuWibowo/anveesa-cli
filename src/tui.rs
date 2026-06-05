@@ -46,7 +46,7 @@ enum Msg {
     User { text: String },
     Assistant { text: String },
     Tool { done: bool, ok: bool, text: String, elapsed_ms: Option<u128> },
-    FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)> },
+    FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)>, collapsed: bool },
     Error(String),
     System(String),
     Separator, // thin line between turns — "AI is done, your turn"
@@ -113,6 +113,13 @@ pub struct App {
     usage: Usage,
     session_cost_usd: f64,
     cwd: String,
+
+    // message navigation / collapsing
+    msg_focus: Option<usize>,
+    msg_line_offsets: Vec<usize>,
+
+    // tab completion state: (original input, candidates, current index)
+    tab_state: Option<(String, Vec<String>, usize)>,
 
     // mode
     mode: Mode,
@@ -199,6 +206,10 @@ impl App {
             usage: Usage::default(),
             session_cost_usd: 0.0,
             cwd,
+
+            msg_focus: None,
+            msg_line_offsets: Vec::new(),
+            tab_state: None,
 
             mode: Mode::Input,
             confirm: None,
@@ -393,11 +404,50 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
             app.input_cursor += 1;
             app.hist_idx = None;
         }
+        KeyCode::Tab => {
+            tab_complete(app);
+        }
+
+        KeyCode::Char('[') if app.input.is_empty() => {
+            let cur = app.msg_focus.unwrap_or(app.messages.len());
+            let prev = app.messages[..cur].iter().rposition(|m| matches!(m, Msg::FileOp { .. }));
+            if let Some(idx) = prev {
+                app.msg_focus = Some(idx);
+                app.auto_scroll = false;
+                if let Some(&off) = app.msg_line_offsets.get(idx) {
+                    app.scroll = off.saturating_sub(2);
+                }
+            }
+        }
+        KeyCode::Char(']') if app.input.is_empty() => {
+            let start = app.msg_focus.map(|i| i + 1).unwrap_or(0);
+            let next = app.messages[start..].iter().position(|m| matches!(m, Msg::FileOp { .. })).map(|i| start + i);
+            if let Some(idx) = next {
+                app.msg_focus = Some(idx);
+                app.auto_scroll = false;
+                if let Some(&off) = app.msg_line_offsets.get(idx) {
+                    app.scroll = off.saturating_sub(2);
+                }
+            }
+        }
+        KeyCode::Esc if app.msg_focus.is_some() => {
+            app.msg_focus = None;
+        }
+
         KeyCode::Enter => {
+            // Toggle collapse on focused FileOp if one is selected
+            if let Some(idx) = app.msg_focus {
+                if let Some(Msg::FileOp { collapsed, .. }) = app.messages.get_mut(idx) {
+                    *collapsed = !*collapsed;
+                    return Ok(());
+                }
+            }
             let text = app.input.trim().to_string();
             if text.is_empty() {
                 return Ok(());
             }
+            app.msg_focus = None;
+            app.tab_state = None;
             if !handle_slash_command(app, &text) {
                 submit_prompt(app, text).await?;
             }
@@ -459,6 +509,7 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
                 app.input.drain(start..app.input_cursor);
                 app.input_cursor = start;
                 app.hist_idx = None;
+                app.tab_state = None;
             }
         }
         KeyCode::Delete => {
@@ -466,6 +517,7 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
                 let len = next_char_len(&app.input, app.input_cursor);
                 app.input.drain(app.input_cursor..app.input_cursor + len);
                 app.hist_idx = None;
+                app.tab_state = None;
             }
         }
 
@@ -536,6 +588,8 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
             app.input.insert_str(app.input_cursor, &s);
             app.input_cursor += s.len();
             app.hist_idx = None;
+            app.msg_focus = None;
+            app.tab_state = None;
         }
 
         _ => {}
@@ -577,6 +631,8 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
                  /model [name] · /provider [name] · /status · /exit\n\
                  \n\
                  Keys: ↑/↓ history  ←/→ cursor  Home/End  Shift+Enter newline\n\
+                 Tab   complete /command or file path (press again to cycle)\n\
+                 [ ]   navigate between file diffs  Enter expand/collapse focused diff\n\
                  j/k scroll (when input empty)  PageUp/Dn scroll\n\
                  Ctrl+V paste (image or text)  Ctrl+M scroll/select mode\n\
                  Ctrl+W delete-word  Ctrl+U clear line\n\
@@ -728,6 +784,87 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
     }
 }
 
+// ── Tab completion ────────────────────────────────────────────────────────────
+
+const SLASH_COMMANDS: &[&str] = &[
+    "/clear", "/compact", "/copy", "/exit", "/export",
+    "/help", "/model", "/provider", "/quit", "/status", "/undo",
+];
+
+fn tab_complete(app: &mut App) {
+    let input = app.input.clone();
+
+    // If we're still on the same completion cycle, advance the index
+    let continuing = app.tab_state.as_ref().map(|(_, cands, idx)| {
+        cands.get(*idx).map(|s| s == &input).unwrap_or(false)
+    }).unwrap_or(false);
+
+    if continuing {
+        if let Some((_, cands, idx)) = &mut app.tab_state {
+            *idx = (*idx + 1) % cands.len();
+            let next = cands[*idx].clone();
+            app.input = next;
+            app.input_cursor = app.input.len();
+        }
+        return;
+    }
+
+    let cands = compute_tab_completions(&input, &app.cwd);
+    if cands.is_empty() { return; }
+
+    app.input = cands[0].clone();
+    app.input_cursor = app.input.len();
+    app.tab_state = Some((input, cands, 0));
+}
+
+fn compute_tab_completions(input: &str, cwd: &str) -> Vec<String> {
+    // Slash command completion: /pro → /provider, /model, …
+    if input.starts_with('/') && !input.contains(' ') {
+        let matches: Vec<String> = SLASH_COMMANDS.iter()
+            .filter(|c| c.starts_with(input))
+            .map(|s| s.to_string())
+            .collect();
+        if !matches.is_empty() { return matches; }
+    }
+
+    // File path completion after "/export <path>"
+    if let Some(partial) = input.strip_prefix("/export ") {
+        let paths = tab_complete_path(partial, cwd);
+        return paths.into_iter().map(|p| format!("/export {p}")).collect();
+    }
+
+    vec![]
+}
+
+fn tab_complete_path(partial: &str, cwd: &str) -> Vec<String> {
+    let (dir_part, file_part) = if let Some(i) = partial.rfind('/') {
+        (&partial[..i + 1], &partial[i + 1..])
+    } else {
+        ("", partial)
+    };
+
+    let search_dir = if dir_part.is_empty() {
+        std::path::PathBuf::from(cwd)
+    } else if dir_part.starts_with('/') {
+        std::path::PathBuf::from(dir_part)
+    } else {
+        std::path::Path::new(cwd).join(dir_part)
+    };
+
+    let Ok(entries) = std::fs::read_dir(&search_dir) else { return vec![]; };
+    let mut out: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if !name.starts_with(file_part) { return None; }
+            let trail = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) { "/" } else { "" };
+            Some(format!("{dir_part}{name}{trail}"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
     // Save to input history
     if app.input_history.last().map(|s| s.as_str()) != Some(&text) {
@@ -874,11 +1011,11 @@ async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
         TuiEvent::FileOp { verb, path, added, removed, diff } => {
             flush_streaming_buf(app);
             commit_pending_tool(app, true);
-            // Snapshot for /undo (read current content before the write is reflected in messages)
             let old_content = std::fs::read_to_string(&path).ok();
             if app.undo_stack.len() >= 20 { app.undo_stack.remove(0); }
             app.undo_stack.push((path.clone(), old_content));
-            app.messages.push(Msg::FileOp { verb, path, added, removed, diff });
+            let collapsed = diff.len() > 8;
+            app.messages.push(Msg::FileOp { verb, path, added, removed, diff, collapsed });
         }
         TuiEvent::Confirm { summary, diff, reply } => {
             flush_streaming_buf(app);
@@ -1165,8 +1302,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width.saturating_sub(4) as usize;
     let mut lines: Vec<Line<'static>> = vec![Line::from("")];
+    let mut msg_offsets: Vec<usize> = Vec::with_capacity(app.messages.len());
 
-    for msg in &app.messages {
+    for (msg_idx, msg) in app.messages.iter().enumerate() {
+        msg_offsets.push(lines.len());
+        let focused = app.msg_focus == Some(msg_idx);
+        let _ = focused; // used below in FileOp branch
         match msg {
             Msg::User { text } => {
                 lines.push(user_header());
@@ -1201,32 +1342,43 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
                 ]));
                 lines.push(Line::from(""));
             }
-            Msg::FileOp { verb, path, added, removed, diff } => {
+            Msg::FileOp { verb, path, added, removed, diff, collapsed } => {
+                let focus_icon = if focused { "►" } else { " " };
+                let header_bg = if focused { Color::Rgb(25, 25, 50) } else { Color::Reset };
+                let toggle_hint = if *collapsed {
+                    format!("  [▶ {} lines]", diff.len())
+                } else if diff.len() > 8 {
+                    "  [▼ collapse]".to_string()
+                } else {
+                    String::new()
+                };
                 lines.push(Line::from(vec![
-                    Span::styled("  📄 ", Style::default().fg(Color::Rgb(229, 192, 123))),
-                    Span::styled(format!("{verb} "), Style::default().fg(Color::White)),
-                    Span::styled(path.clone(), Style::default().fg(Color::Rgb(97, 175, 239))),
-                    Span::styled(format!("  +{added}"), Style::default().fg(Color::Rgb(152, 195, 121))),
-                    Span::styled(format!(" -{removed}"), Style::default().fg(Color::Rgb(224, 108, 117))),
+                    Span::styled(format!(" {focus_icon}📄 "), Style::default().fg(Color::Rgb(229, 192, 123)).bg(header_bg)),
+                    Span::styled(format!("{verb} "), Style::default().fg(Color::White).bg(header_bg)),
+                    Span::styled(path.clone(), Style::default().fg(Color::Rgb(97, 175, 239)).bg(header_bg)),
+                    Span::styled(format!("  +{added}"), Style::default().fg(Color::Rgb(152, 195, 121)).bg(header_bg)),
+                    Span::styled(format!(" -{removed}"), Style::default().fg(Color::Rgb(224, 108, 117)).bg(header_bg)),
+                    Span::styled(toggle_hint, Style::default().fg(Color::Rgb(80, 80, 100)).bg(header_bg)),
                 ]));
-                // Show inline diff (up to 40 lines)
-                for (is_add, line) in diff.iter().take(40) {
-                    let (prefix, color) = if *is_add {
-                        ("  + ", Color::Rgb(152, 195, 121))
-                    } else {
-                        ("  - ", Color::Rgb(224, 108, 117))
-                    };
-                    let bg = if *is_add { Color::Rgb(20, 35, 20) } else { Color::Rgb(35, 20, 20) };
-                    lines.push(Line::from(Span::styled(
-                        format!("{prefix}{}", &line.trim_end().chars().take(width.saturating_sub(6)).collect::<String>()),
-                        Style::default().fg(color).bg(bg),
-                    )));
-                }
-                if diff.len() > 40 {
-                    lines.push(Line::from(Span::styled(
-                        format!("  … {} more lines", diff.len() - 40),
-                        Style::default().fg(Color::DarkGray),
-                    )));
+                if !collapsed {
+                    for (is_add, line) in diff.iter().take(40) {
+                        let (prefix, color) = if *is_add {
+                            ("  + ", Color::Rgb(152, 195, 121))
+                        } else {
+                            ("  - ", Color::Rgb(224, 108, 117))
+                        };
+                        let bg = if *is_add { Color::Rgb(20, 35, 20) } else { Color::Rgb(35, 20, 20) };
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}{}", &line.trim_end().chars().take(width.saturating_sub(6)).collect::<String>()),
+                            Style::default().fg(color).bg(bg),
+                        )));
+                    }
+                    if diff.len() > 40 {
+                        lines.push(Line::from(Span::styled(
+                            format!("  … {} more lines", diff.len() - 40),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
                 }
                 lines.push(Line::from(""));
             }
@@ -1257,6 +1409,8 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
             }
         }
     }
+
+    app.msg_line_offsets = msg_offsets;
 
     // Live pending tool (running, not yet committed) — animated with elapsed time
     if let Some(tool) = &app.pending_tool {
