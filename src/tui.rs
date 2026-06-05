@@ -32,7 +32,7 @@ pub enum TuiEvent {
     ToolDone { summary: String, ok: bool },
     // diff: Vec<(is_add, line)>
     FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)> },
-    Confirm { summary: String, reply: oneshot::Sender<ApprovalDecision> },
+    Confirm { summary: String, diff: Vec<(bool, String)>, reply: oneshot::Sender<ApprovalDecision> },
     Usage(Usage),
     Error(String),
     PlanSet(Vec<String>),
@@ -60,6 +60,7 @@ struct PendingTool {
 #[derive(Debug)]
 struct PendingConfirm {
     summary: String,
+    diff: Vec<(bool, String)>,
     reply: oneshot::Sender<ApprovalDecision>,
 }
 
@@ -110,6 +111,7 @@ pub struct App {
     provider: String,
     model: String,
     usage: Usage,
+    session_cost_usd: f64,
     cwd: String,
 
     // mode
@@ -195,6 +197,7 @@ impl App {
             provider,
             model,
             usage: Usage::default(),
+            session_cost_usd: 0.0,
             cwd,
 
             mode: Mode::Input,
@@ -816,13 +819,15 @@ async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
                     TuiEvent::FileOp { verb, path, added, removed, diff }
                 }
                 StreamEvent::Confirm { preview, reply } => {
-                    let summary = match &preview {
-                        ToolConfirmPreview::FileOp { verb, path, added, removed, .. } =>
+                    let (summary, diff) = match preview {
+                        ToolConfirmPreview::FileOp { verb, path, added, removed, diff, .. } => (
                             format!("{verb} {path}  +{added} -{removed}"),
-                        ToolConfirmPreview::CreateDir { path } => format!("mkdir {path}"),
-                        ToolConfirmPreview::Generic { summary } => summary.clone(),
+                            diff.into_iter().map(|dl| (matches!(dl.kind, crate::provider::DiffKind::Add), dl.text)).collect(),
+                        ),
+                        ToolConfirmPreview::CreateDir { path } => (format!("mkdir {path}"), vec![]),
+                        ToolConfirmPreview::Generic { summary } => (summary, vec![]),
                     };
-                    TuiEvent::Confirm { summary, reply }
+                    TuiEvent::Confirm { summary, diff, reply }
                 }
                 StreamEvent::Usage(u) => TuiEvent::Usage(u),
                 StreamEvent::PlanSet { tasks } => TuiEvent::PlanSet(tasks),
@@ -875,10 +880,10 @@ async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             app.undo_stack.push((path.clone(), old_content));
             app.messages.push(Msg::FileOp { verb, path, added, removed, diff });
         }
-        TuiEvent::Confirm { summary, reply } => {
+        TuiEvent::Confirm { summary, diff, reply } => {
             flush_streaming_buf(app);
             commit_pending_tool(app, true);
-            app.confirm = Some(PendingConfirm { summary, reply });
+            app.confirm = Some(PendingConfirm { summary, diff, reply });
             app.mode = Mode::Confirming;
         }
         TuiEvent::Usage(u) => {
@@ -887,6 +892,11 @@ async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             app.usage.total_tokens += u.total_tokens;
             app.usage.cache_read_tokens += u.cache_read_tokens;
             app.usage.cache_write_tokens += u.cache_write_tokens;
+            let (in_price, out_price, cr_price, cw_price) = model_pricing(&app.model);
+            app.session_cost_usd += (u.prompt_tokens as f64 - u.cache_read_tokens as f64 - u.cache_write_tokens as f64).max(0.0) * in_price / 1_000_000.0
+                + u.completion_tokens as f64 * out_price / 1_000_000.0
+                + u.cache_read_tokens as f64 * cr_price / 1_000_000.0
+                + u.cache_write_tokens as f64 * cw_price / 1_000_000.0;
             finish_turn(app);
         }
         TuiEvent::Error(msg) => {
@@ -977,6 +987,11 @@ fn finish_turn(app: &mut App) {
             }
         }
     }
+    if let Some(started) = app.streaming_started_at {
+        if started.elapsed() > Duration::from_secs(8) {
+            send_desktop_notification("anveesa", "Task complete");
+        }
+    }
     app.mode = Mode::Input;
     app.tool_status.clear();
     app.streaming_started_at = None;
@@ -1013,11 +1028,18 @@ fn render(frame: &mut Frame, app: &mut App) {
     let input_lines = app.input.lines().count().max(1);
     let input_height = (input_lines as u16).clamp(1, 5) + 2;
 
+    let status_height = if app.mode == Mode::Confirming {
+        let diff_rows = app.confirm.as_ref().map(|c| c.diff.len().min(20) as u16).unwrap_or(0);
+        1 + diff_rows
+    } else {
+        1
+    };
+
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(input_height),
-        Constraint::Length(1),
+        Constraint::Length(status_height),
     ])
     .split(area);
 
@@ -1025,6 +1047,55 @@ fn render(frame: &mut Frame, app: &mut App) {
     render_messages(frame, chunks[1], app);
     render_input(frame, chunks[2], app);
     render_status(frame, chunks[3], app);
+}
+
+/// Returns (input_$/M, output_$/M, cache_read_$/M, cache_write_$/M).
+fn model_pricing(model: &str) -> (f64, f64, f64, f64) {
+    let m = model.to_lowercase();
+    if m.contains("claude") {
+        if m.contains("opus") {
+            (15.0, 75.0, 1.5, 18.75)
+        } else if m.contains("sonnet") {
+            (3.0, 15.0, 0.3, 3.75)
+        } else if m.contains("haiku") {
+            if m.contains("3-5") || m.contains("3.5") { (0.25, 1.25, 0.03, 0.30) }
+            else { (0.80, 4.0, 0.08, 1.0) }
+        } else {
+            (3.0, 15.0, 0.3, 3.75)
+        }
+    } else if m.contains("gpt-4o-mini") {
+        (0.15, 0.60, 0.075, 0.0)
+    } else if m.contains("gpt-4o") {
+        (2.50, 10.0, 1.25, 0.0)
+    } else if m.contains("gpt-4-turbo") || m.contains("gpt-4-1106") {
+        (10.0, 30.0, 0.0, 0.0)
+    } else if m.contains("gpt-3.5") {
+        (0.50, 1.50, 0.0, 0.0)
+    } else if m.contains("gemini-1.5-flash") {
+        (0.075, 0.30, 0.0, 0.0)
+    } else if m.contains("gemini") {
+        (1.25, 5.0, 0.0, 0.0)
+    } else {
+        (1.0, 3.0, 0.0, 0.0)
+    }
+}
+
+fn send_desktop_notification(title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            body.replace('"', "'"),
+            title.replace('"', "'")
+        );
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send").args([title, body]).spawn();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    { let _ = (title, body); }
 }
 
 fn context_window_tokens(model: &str) -> usize {
@@ -1061,7 +1132,19 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         else if pct > 50 { Color::Rgb(229, 192, 123) }
         else { Color::Rgb(152, 195, 121) };
 
-    let left = format!(" anveesa v{version}{token_str}");
+    let cost_str = if app.session_cost_usd > 0.0 {
+        if app.session_cost_usd < 0.001 {
+            " <$0.001".to_string()
+        } else if app.session_cost_usd < 1.0 {
+            format!(" ~${:.3}", app.session_cost_usd)
+        } else {
+            format!(" ~${:.2}", app.session_cost_usd)
+        }
+    } else {
+        String::new()
+    };
+
+    let left = format!(" anveesa v{version}{token_str}{cost_str}");
     let mid = format!("  {bar}  ");
     let right = format!(" {} · {} ", app.provider, app.model);
     let gap = (area.width as usize)
@@ -1319,13 +1402,27 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     match app.mode {
         Mode::Confirming => {
-            let summary = app.confirm.as_ref().map(|c| c.summary.as_str()).unwrap_or("?");
-            let text = format!(" ⚠  {summary}   [y] allow once   [a] allow all   [n] deny ");
-            frame.render_widget(
-                Paragraph::new(text)
-                    .style(Style::default().fg(Color::Black).bg(Color::Rgb(224, 108, 117))),
-                area,
-            );
+            let summary = app.confirm.as_ref().map(|c| c.summary.clone()).unwrap_or_default();
+            let diff = app.confirm.as_ref().map(|c| c.diff.clone()).unwrap_or_default();
+            let w = area.width as usize;
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (is_add, line_text) in diff.iter().take(20) {
+                let (prefix, fg, bg) = if *is_add {
+                    ("+ ", Color::Rgb(152, 195, 121), Color::Rgb(20, 35, 20))
+                } else {
+                    ("- ", Color::Rgb(224, 108, 117), Color::Rgb(35, 20, 20))
+                };
+                let truncated: String = line_text.trim_end().chars().take(w.saturating_sub(3)).collect();
+                lines.push(Line::from(Span::styled(
+                    format!(" {prefix}{truncated}"),
+                    Style::default().fg(fg).bg(bg),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                format!(" ⚠  {summary}   [y] allow once   [a] allow all   [n] deny "),
+                Style::default().fg(Color::Black).bg(Color::Rgb(224, 108, 117)),
+            )));
+            frame.render_widget(Paragraph::new(lines), area);
         }
         Mode::Streaming => {
             let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

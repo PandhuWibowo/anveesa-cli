@@ -181,17 +181,46 @@ pub async fn ask(
         tool_rounds += 1;
 
         messages.push(assistant_tool_message(&state));
-        for call in &state.tool_calls {
-            if tools::is_write_tool(&call.name) {
-                any_write_tool_used = true;
+
+        let all_readonly = state.tool_calls.len() > 1
+            && state.tool_calls.iter().all(|c| {
+                !tools::is_write_tool(&c.name)
+                    && c.name != "set_plan"
+                    && c.name != "complete_task"
+            });
+
+        if all_readonly {
+            let mut handles = Vec::with_capacity(state.tool_calls.len());
+            for call in state.tool_calls.iter().cloned() {
+                let ev = events.clone();
+                let mcp_arc = request.mcp.clone();
+                handles.push(tokio::spawn(dispatch_read_only_tool(call, ev, mcp_arc)));
             }
-            let content = dispatch_tool(call, policy, &mut approval_state, events, request.mcp.as_deref()).await;
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "name": call.name,
-                "content": content,
-            }));
+            for (i, handle) in handles.into_iter().enumerate() {
+                let (id, name, content) = handle.await.unwrap_or_else(|_| {
+                    let c = &state.tool_calls[i];
+                    (c.id.clone(), c.name.clone(), json!({"ok":false,"error":"task panicked"}).to_string())
+                });
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "name": name,
+                    "content": content,
+                }));
+            }
+        } else {
+            for call in &state.tool_calls {
+                if tools::is_write_tool(&call.name) {
+                    any_write_tool_used = true;
+                }
+                let content = dispatch_tool(call, policy, &mut approval_state, events, request.mcp.as_deref()).await;
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "content": content,
+                }));
+            }
         }
 
         let _ = events.send(StreamEvent::Status {
@@ -219,6 +248,35 @@ struct ToolApprovalState {
     allow_for_turn: bool,
     /// Tracks how many times each identical (name, arguments) pair has been called this turn.
     call_counts: std::collections::HashMap<(String, String), usize>,
+}
+
+async fn dispatch_read_only_tool(
+    call: PartialToolCall,
+    events: UnboundedSender<StreamEvent>,
+    mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
+) -> (String, String, String) {
+    if tools::is_mcp_tool(&call.name) {
+        let summary = format!("mcp {}", &call.name[5..]);
+        let _ = events.send(StreamEvent::ToolCall { summary: summary.clone() });
+        let started = Instant::now();
+        let result = if let Some(m) = mcp.as_deref() {
+            m.call(&call.name, &call.arguments).await
+                .unwrap_or_else(|| json!({ "ok": false, "error": "server not found" }).to_string())
+        } else {
+            json!({ "ok": false, "error": "MCP not configured" }).to_string()
+        };
+        let (ok, err) = parse_tool_result_status(&result);
+        let _ = events.send(StreamEvent::ToolResult { summary, ok, elapsed_ms: started.elapsed().as_millis(), error: err });
+        return (call.id, call.name, result);
+    }
+
+    let summary = tools::describe_call(&call.name, &call.arguments);
+    let _ = events.send(StreamEvent::ToolCall { summary: summary.clone() });
+    let started = Instant::now();
+    let result = tools::run(&call.name, &call.arguments).await;
+    let (ok, err) = parse_tool_result_status(&result);
+    let _ = events.send(StreamEvent::ToolResult { summary, ok, elapsed_ms: started.elapsed().as_millis(), error: err });
+    (call.id, call.name, result)
 }
 
 async fn dispatch_tool(
