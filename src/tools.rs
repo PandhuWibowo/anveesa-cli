@@ -42,6 +42,12 @@ After each step completes, call complete_task with the zero-based index of that 
 Do not describe your plan in prose — use set_plan instead.",
     );
     text.push_str(
+        " CRITICAL — avoid redundant tool calls: All previous tool results are in your context. \
+Do NOT re-read or re-list files and directories you have already inspected in this conversation. \
+Before calling read_file or list_dir, check your conversation history first. \
+Only call tools for information you do not yet have.",
+    );
+    text.push_str(
         " If a tool call fails or a command times out, do NOT retry it automatically. \
 Stop immediately, report the exact error to the user, and wait for their input.",
     );

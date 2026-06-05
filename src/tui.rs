@@ -86,7 +86,9 @@ pub struct App {
     pending_prompt: String,
     streaming_started_at: Option<Instant>,
     tool_started_at: Option<Instant>,
-    unread_count: usize, // messages added while scrolled away
+    unread_count: usize,
+    // files/dirs already read this session — injected into workspace context each turn
+    seen_paths: std::collections::BTreeSet<String>,
 
     // input
     input: String,
@@ -173,6 +175,7 @@ impl App {
             streaming_started_at: None,
             tool_started_at: None,
             unread_count: 0,
+            seen_paths: std::collections::BTreeSet::new(),
 
             input: String::new(),
             input_cursor: 0,
@@ -538,6 +541,7 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
             app.accumulated_response.clear();
             app.usage = Usage::default();
             app.pending_image = None;
+            app.seen_paths.clear();
             app.input.clear();
             app.input_cursor = 0;
             if let Some(path) = &app.session_path {
@@ -690,7 +694,11 @@ async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
     let config = app.config.clone();
     let options = app.options.clone();
     let history = app.history.clone();
-    let workspace_context = app.workspace_context.clone();
+    // Augment workspace context with already-seen paths so the model doesn't re-scan them
+    let workspace_context = augmented_workspace_context(
+        app.workspace_context.as_deref(),
+        &app.seen_paths,
+    );
     let policy = app.policy;
     let mcp_arc = app.mcp.clone();
     let tui_tx = app.stream_tx.clone();
@@ -780,6 +788,8 @@ async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
         }
         TuiEvent::ToolDone { summary, ok } => {
             let elapsed_ms = app.tool_started_at.take().map(|t| t.elapsed().as_millis());
+            // Record the inspected path so we can tell the model what it already knows
+            record_seen_path(&mut app.seen_paths, &summary);
             app.pending_tool = Some(PendingTool { summary });
             commit_pending_tool_timed(app, ok, elapsed_ms);
             app.tool_status = "Thinking".to_string();
@@ -817,6 +827,39 @@ async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             if i < app.plan_done.len() { app.plan_done[i] = true; }
         }
     }
+}
+
+/// Extract a path from a tool call summary string and record it as "already seen".
+fn record_seen_path(seen: &mut std::collections::BTreeSet<String>, summary: &str) {
+    // Summaries look like "read file src/foo.ts" or "list directory src/bar"
+    // or "git status", "web search `...`" — only record file/dir paths
+    for prefix in &["read file ", "list directory "] {
+        if let Some(path) = summary.strip_prefix(prefix) {
+            let path = path.trim().to_string();
+            if !path.is_empty() {
+                seen.insert(path);
+            }
+            return;
+        }
+    }
+}
+
+/// Build an augmented workspace context that includes already-seen paths.
+fn augmented_workspace_context(
+    base: Option<&str>,
+    seen: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    if seen.is_empty() {
+        return base.map(str::to_string);
+    }
+    let seen_note = format!(
+        "\nAlready inspected this session (do NOT re-read these):\n{}",
+        seen.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n")
+    );
+    Some(match base {
+        Some(b) => format!("{b}{seen_note}"),
+        None => seen_note,
+    })
 }
 
 /// Flush streaming_buf to messages and accumulated_response.
