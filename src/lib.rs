@@ -82,8 +82,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         .get(&provider_name)
         .with_context(|| format!("unknown provider '{provider_name}'"))?;
     let _tools_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
-    let images_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
-    let mut images_available = images_available;
+    let mut images_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
     let model = options
         .model
         .clone()
@@ -2030,7 +2029,7 @@ fn term_width() -> usize {
 }
 
 /// Cheap fingerprint for deduplication: length + first 64 base64 chars.
-fn image_fingerprint(img: &ImageAttachment) -> String {
+pub fn image_fingerprint(img: &ImageAttachment) -> String {
     let prefix: String = img.data.chars().take(64).collect();
     format!("{}:{}", img.data.len(), prefix)
 }

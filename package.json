@@ -1,6 +1,6 @@
 {
   "name": "anveesa",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "A terminal CLI that wraps AI providers (OpenAI-compatible APIs and local CLIs) into a single unified command",
   "main": "bin/anveesa.js",
   "bin": {
