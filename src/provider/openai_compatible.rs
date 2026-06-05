@@ -686,14 +686,23 @@ fn build_messages(
     prompt_cache: bool,
 ) -> Vec<Value> {
     let mut messages = Vec::new();
-    if let Some(system) = &request.system {
-        messages.push(json!({ "role": "system", "content": system }));
-    }
-    if let Some(workspace_context) = &request.workspace_context {
-        messages.push(json!({ "role": "system", "content": workspace_context }));
-    }
-    messages
-        .push(json!({ "role": "system", "content": tools::guidance(policy.allows_write_tools()) }));
+
+    // Merge all system-level content into a single system message.
+    // Many providers (Qwen3, etc.) only allow one system message and require
+    // it to be the very first message — multiple system messages cause HTTP 400.
+    let guidance = tools::guidance(policy.allows_write_tools());
+    let system_content = [
+        request.system.as_deref(),
+        request.workspace_context.as_deref(),
+        Some(guidance.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n\n");
+
+    messages.push(json!({ "role": "system", "content": system_content }));
+
     for message in &request.history {
         let role = match message.role {
             ChatRole::User => "user",
