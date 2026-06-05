@@ -24,8 +24,8 @@ use crate::{
         set_default_provider,
     },
     provider::{
-        ApprovalDecision, ApprovalPolicy, ChatMessage, DiffKind, ImageAttachment, PromptRequest,
-        StreamEvent, ToolConfirmPreview, TurnResult, Usage,
+        ApprovalDecision, ApprovalPolicy, ChatMessage, ChatRole, DiffKind, ImageAttachment,
+        PromptRequest, StreamEvent, ToolConfirmPreview, TurnResult, Usage,
     },
 };
 
@@ -123,7 +123,24 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
     let session_saved_at = loaded_session.as_ref().filter(|s| s.saved_at > 0).map(|s| s.saved_at);
     // tracks the most recent successful save this run — kept fresh for /session display
     let mut last_saved_at: u64 = session_saved_at.unwrap_or(0);
+    // Per-project system prompt: load .anveesa from cwd if no --system was given.
+    if session_options.system.is_none() {
+        if let Ok(text) = fs::read_to_string(cwd.join(".anveesa")) {
+            let trimmed = text.trim().to_string();
+            if !trimmed.is_empty() {
+                session_options.system = Some(trimmed);
+            }
+        }
+    }
+
     let history_path = repl_history_path();
+    // Load prompt history for ↑/↓ recall (one entry per line, newest at end).
+    let input_history: Vec<String> = history_path
+        .as_deref()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .map(|c| c.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
+
     print_session_header(
         &provider_name,
         session_options.model.as_deref().unwrap_or("-"),
@@ -144,7 +161,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
     loop {
         print_input_separator(is_tty, width);
         let (line, ctrl_v_image) =
-            match read_prompt_line(&label, width, &mut paste_count, images_available) {
+            match read_prompt_line(&label, width, &mut paste_count, images_available, &input_history) {
                 Ok(PromptRead::Line(line, img)) => (line, img),
                 Ok(PromptRead::Interrupted) => continue,
                 Ok(PromptRead::Eof) => {
@@ -195,6 +212,25 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                     history.len() / 2,
                     Some(last_saved_at).filter(|&t| t > 0),
                 );
+                continue;
+            }
+            s if s.starts_with("/export") => {
+                let arg = s.strip_prefix("/export").unwrap().trim();
+                let path = if arg.is_empty() {
+                    cwd.join(format!("anveesa-export-{}.md", unix_now()))
+                } else {
+                    std::path::PathBuf::from(arg)
+                };
+                match export_conversation(&path, &history) {
+                    Ok(()) => {
+                        if is_tty {
+                            eprintln!("\x1b[2m  Exported to {}\x1b[0m", path.display());
+                        } else {
+                            println!("exported to {}", path.display());
+                        }
+                    }
+                    Err(e) => eprintln!("\x1b[1;31m✗\x1b[0m {e:#}"),
+                }
                 continue;
             }
             "/status" => {
@@ -1107,8 +1143,9 @@ fn print_status_inline(
 
 fn print_help_inline(is_tty: bool) {
     if !is_tty {
-        println!("commands: /clear, /session, /attach [path], /exit, /quit, /help");
-        println!("images: copy an image (Cmd+C), then send a message to auto-attach it");
+        println!("commands: /clear, /export [path], /session, /attach [path], /exit, /quit, /help");
+        println!("keys: ↑/↓ history  ←/→ cursor  Home/End  Ctrl+W delete-word  Ctrl+U clear-line");
+        println!("images: Ctrl+V to paste clipboard image, or copy then send to auto-attach");
         return;
     }
     println!();
@@ -1116,6 +1153,7 @@ fn print_help_inline(is_tty: bool) {
     println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
     println!("  \x1b[1;32m/status\x1b[0m             provider, model, turns, token usage");
     println!("  \x1b[1;32m/session\x1b[0m            show session file, age, and turn count");
+    println!("  \x1b[1;32m/export\x1b[0m \x1b[2m[path]\x1b[0m     save conversation to a markdown file");
     println!("  \x1b[1;32m/model\x1b[0m \x1b[2m[name]\x1b[0m      switch or show current model");
     println!("  \x1b[1;32m/provider\x1b[0m \x1b[2m[name]\x1b[0m   switch or show current provider");
     println!("  \x1b[1;32m/clear\x1b[0m              reset conversation and delete saved session");
@@ -1123,9 +1161,19 @@ fn print_help_inline(is_tty: bool) {
     println!("  \x1b[1;32m/exit\x1b[0m, \x1b[1;32m/quit\x1b[0m       leave the session");
     println!("  \x1b[1;32m/help\x1b[0m               show this message");
     println!();
+    println!("\x1b[2m  Keyboard\x1b[0m");
+    println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
+    println!("  \x1b[2m↑ / ↓\x1b[0m          recall previous / next prompt");
+    println!("  \x1b[2m← / →\x1b[0m          move cursor left / right");
+    println!("  \x1b[2mHome / End\x1b[0m      jump to start / end of line");
+    println!("  \x1b[2mCtrl+W\x1b[0m          delete word before cursor");
+    println!("  \x1b[2mCtrl+U\x1b[0m          clear entire line  \x1b[2m(also Cmd+Delete)\x1b[0m");
+    println!("  \x1b[2mCtrl+V\x1b[0m          paste image from clipboard");
+    println!();
     println!("\x1b[2m  Images\x1b[0m");
     println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
-    println!("  Cmd+C an image, then send a message — it attaches automatically.");
+    println!("  \x1b[2mCtrl+V\x1b[0m to paste a clipboard image inline (shows \x1b[2m[📎]\x1b[0m indicator).");
+    println!("  Or Cmd+C an image and send any message — it attaches automatically.");
     println!("  Or use \x1b[1;32m/attach\x1b[0m \x1b[2mpath/to/file.png\x1b[0m for a specific file.");
     println!("  For broadest clipboard support: \x1b[2mbrew install pngpaste\x1b[0m");
     println!();
@@ -1165,6 +1213,26 @@ fn print_session_info(is_tty: bool, path: Option<&Path>, turns: usize, saved_at:
     }
     println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
     println!();
+}
+
+fn export_conversation(path: &std::path::Path, history: &[ChatMessage]) -> Result<()> {
+    let mut out = String::new();
+    for msg in history {
+        match msg.role {
+            ChatRole::User => {
+                out.push_str("## You\n\n");
+                out.push_str(&msg.content);
+                out.push_str("\n\n");
+            }
+            ChatRole::Assistant => {
+                out.push_str("## Assistant\n\n");
+                out.push_str(&msg.content);
+                out.push_str("\n\n");
+            }
+        }
+    }
+    fs::write(path, out.trim_end())
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn list_providers() -> Result<()> {
@@ -1336,6 +1404,8 @@ struct PromptBuffer {
     full: String,
     display: String,
     segments: Vec<PromptSegment>,
+    /// Byte offset into `full` — where the next insertion goes.
+    cursor: usize,
 }
 
 impl PromptBuffer {
@@ -1343,28 +1413,63 @@ impl PromptBuffer {
         self.full.is_empty()
     }
 
-    fn push_text(&mut self, text: &str) {
-        self.full.push_str(text);
-        self.display.push_str(text);
-
-        if let Some(segment) = self.segments.last_mut()
-            && !segment.hidden
-        {
-            segment.full.push_str(text);
-            segment.display.push_str(text);
-            return;
+    /// Char offset in `display` that corresponds to the current cursor position in `full`.
+    /// Used to position the terminal cursor after a redraw.
+    fn display_cursor_char(&self) -> usize {
+        let mut full_pos = 0usize;
+        let mut disp_chars = 0usize;
+        for seg in &self.segments {
+            let seg_len = seg.full.len();
+            let next_pos = full_pos + seg_len;
+            if self.cursor <= next_pos {
+                let offset = self.cursor - full_pos;
+                return if seg.hidden {
+                    // Hidden spans are atomic: cursor snaps to end of placeholder.
+                    disp_chars + seg.display.chars().count()
+                } else {
+                    disp_chars + seg.full[..offset].chars().count()
+                };
+            }
+            full_pos = next_pos;
+            disp_chars += seg.display.chars().count();
         }
+        disp_chars
+    }
 
-        self.segments.push(PromptSegment {
-            full: text.to_string(),
-            display: text.to_string(),
-            hidden: false,
-        });
+    fn push_text(&mut self, text: &str) {
+        // Find the segment containing the cursor and insert there.
+        let mut pos = 0usize;
+        for seg in self.segments.iter_mut() {
+            let seg_len = seg.full.len();
+            if !seg.hidden && self.cursor >= pos && self.cursor <= pos + seg_len {
+                let offset = self.cursor - pos;
+                seg.full.insert_str(offset, text);
+                seg.display.insert_str(offset, text);
+                self.cursor += text.len();
+                self.rebuild_flat();
+                return;
+            }
+            pos += seg_len;
+        }
+        // Cursor is at end or after a hidden segment — append to last visible segment.
+        if let Some(seg) = self.segments.last_mut().filter(|s| !s.hidden) {
+            seg.full.push_str(text);
+            seg.display.push_str(text);
+        } else {
+            self.segments.push(PromptSegment {
+                full: text.to_string(),
+                display: text.to_string(),
+                hidden: false,
+            });
+        }
+        self.cursor += text.len();
+        self.rebuild_flat();
     }
 
     fn push_hidden_paste(&mut self, text: String, display: String) {
         self.full.push_str(&text);
         self.display.push_str(&display);
+        self.cursor = self.full.len();
         self.segments.push(PromptSegment {
             full: text,
             display,
@@ -1372,29 +1477,94 @@ impl PromptBuffer {
         });
     }
 
-    fn pop_last(&mut self) {
-        let Some(segment) = self.segments.last_mut() else {
-            return;
-        };
-
-        if segment.hidden {
-            let full_len = segment.full.len();
-            let display_len = segment.display.len();
-            self.full.truncate(self.full.len().saturating_sub(full_len));
-            self.display
-                .truncate(self.display.len().saturating_sub(display_len));
-            self.segments.pop();
+    /// Delete the character immediately before the cursor.
+    /// Deletes the entire span atomically if the cursor is just past a hidden span.
+    fn delete_before_cursor(&mut self) {
+        if self.cursor == 0 {
             return;
         }
-
-        let _ = segment.full.pop();
-        let _ = segment.display.pop();
-        let _ = self.full.pop();
-        let _ = self.display.pop();
-
-        if segment.full.is_empty() {
-            self.segments.pop();
+        let mut pos = 0usize;
+        let mut remove_idx: Option<usize> = None;
+        for (i, seg) in self.segments.iter_mut().enumerate() {
+            let seg_len = seg.full.len();
+            let next_pos = pos + seg_len;
+            if seg.hidden && next_pos == self.cursor {
+                // cursor is right after a hidden span — delete the whole span
+                self.cursor -= seg_len;
+                remove_idx = Some(i);
+                break;
+            }
+            if !seg.hidden && self.cursor > pos && self.cursor <= next_pos {
+                let offset = self.cursor - pos;
+                if let Some(ch) = seg.full[..offset].chars().next_back() {
+                    let ch_len = ch.len_utf8();
+                    seg.full.drain((offset - ch_len)..offset);
+                    seg.display.drain((offset - ch_len)..offset);
+                    self.cursor -= ch_len;
+                    if seg.full.is_empty() {
+                        remove_idx = Some(i);
+                    }
+                }
+                break;
+            }
+            pos = next_pos;
         }
+        if let Some(i) = remove_idx {
+            self.segments.remove(i);
+        }
+        self.rebuild_flat();
+    }
+
+    fn move_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let mut pos = 0usize;
+        for seg in &self.segments {
+            let next_pos = pos + seg.full.len();
+            if seg.hidden && next_pos == self.cursor {
+                self.cursor = pos;
+                return;
+            }
+            if !seg.hidden && self.cursor > pos && self.cursor <= next_pos {
+                let offset = self.cursor - pos;
+                if let Some(ch) = seg.full[..offset].chars().next_back() {
+                    self.cursor -= ch.len_utf8();
+                }
+                return;
+            }
+            pos = next_pos;
+        }
+    }
+
+    fn move_right(&mut self) {
+        if self.cursor >= self.full.len() {
+            return;
+        }
+        let mut pos = 0usize;
+        for seg in &self.segments {
+            let seg_len = seg.full.len();
+            if seg.hidden && pos == self.cursor {
+                self.cursor += seg_len;
+                return;
+            }
+            if !seg.hidden && self.cursor >= pos && self.cursor < pos + seg_len {
+                let offset = self.cursor - pos;
+                if let Some(ch) = seg.full[offset..].chars().next() {
+                    self.cursor += ch.len_utf8();
+                }
+                return;
+            }
+            pos += seg_len;
+        }
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = self.full.len();
     }
 
     /// Ctrl+U / Cmd+Delete — erase the entire line.
@@ -1402,17 +1572,22 @@ impl PromptBuffer {
         self.full.clear();
         self.display.clear();
         self.segments.clear();
+        self.cursor = 0;
     }
 
-    /// Ctrl+W / Option+Delete — erase the last word (whitespace-delimited).
+    /// Ctrl+W / Option+Delete — erase the last word before the cursor.
     fn pop_word(&mut self) {
-        // Trim trailing whitespace first, then remove up to the previous whitespace boundary.
-        while self.full.ends_with(' ') {
-            self.pop_last();
+        while self.cursor > 0 && self.full[..self.cursor].ends_with(' ') {
+            self.delete_before_cursor();
         }
-        while !self.full.is_empty() && !self.full.ends_with(' ') {
-            self.pop_last();
+        while self.cursor > 0 && !self.full[..self.cursor].ends_with(' ') {
+            self.delete_before_cursor();
         }
+    }
+
+    fn rebuild_flat(&mut self) {
+        self.full = self.segments.iter().map(|s| s.full.as_str()).collect();
+        self.display = self.segments.iter().map(|s| s.display.as_str()).collect();
     }
 }
 
@@ -1473,17 +1648,33 @@ impl RawPromptMode {
     }
 }
 
+/// After a redraw (which leaves the terminal cursor at end of display), move it
+/// back to the buffer's logical cursor position.
+fn position_prompt_cursor(display: &str, cursor_char: usize) -> io::Result<()> {
+    let back = display.chars().count().saturating_sub(cursor_char);
+    if back > 0 {
+        print!("\x1b[{}D", back);
+        io::stdout().flush()?;
+    }
+    Ok(())
+}
+
 fn read_prompt_line(
     label: &str,
     width: usize,
     paste_count: &mut usize,
     images_available: bool,
+    input_history: &[String],
 ) -> Result<PromptRead> {
     let _raw_mode = RawPromptMode::enter()?;
     let mut input = io::stdin().lock();
     let mut buffer = PromptBuffer::default();
     let mut display_rows = 1usize;
     let mut ctrl_v_image: Option<ImageAttachment> = None;
+
+    // History navigation state.
+    let mut hist_idx: Option<usize> = None; // None = current live input
+    let mut saved_input = String::new();    // stash live input when navigating into history
 
     // Compose the visible prompt label, optionally prefixed with an image indicator.
     let effective_label = |img: &Option<ImageAttachment>| -> String {
@@ -1493,6 +1684,16 @@ fn read_prompt_line(
             label.to_string()
         }
     };
+
+    // Redraw the line and position the cursor, returning the new row count.
+    macro_rules! redraw {
+        () => {{
+            let lbl = effective_label(&ctrl_v_image);
+            let rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+            let _ = position_prompt_cursor(&buffer.display, buffer.display_cursor_char());
+            rows
+        }};
+    }
 
     print!("{}", effective_label(&ctrl_v_image));
     io::stdout().flush().context("failed to write prompt")?;
@@ -1509,35 +1710,28 @@ fn read_prompt_line(
                 return Ok(PromptRead::Line(buffer.full, ctrl_v_image));
             }
             3 => {
-                // Ctrl+C — discard any pasted image too
-                ctrl_v_image = None;
                 println!("^C");
                 return Ok(PromptRead::Interrupted);
             }
             4 if buffer.is_empty() => return Ok(PromptRead::Eof),
             8 | 127 => {
                 // Backspace
-                buffer.pop_last();
-                let lbl = effective_label(&ctrl_v_image);
-                display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+                buffer.delete_before_cursor();
+                display_rows = redraw!();
             }
             21 => {
                 // Ctrl+U / Cmd+Delete — erase entire line
                 buffer.clear_all();
-                let lbl = effective_label(&ctrl_v_image);
-                display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+                display_rows = redraw!();
             }
             22 if images_available => {
                 // Ctrl+V — paste image from clipboard
                 match grab_clipboard_image() {
                     Some(img) => {
                         ctrl_v_image = Some(img);
-                        let lbl = effective_label(&ctrl_v_image);
-                        display_rows =
-                            redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+                        display_rows = redraw!();
                     }
                     None => {
-                        // No image in clipboard — ring the bell
                         print!("\x07");
                         let _ = io::stdout().flush();
                     }
@@ -1546,23 +1740,90 @@ fn read_prompt_line(
             23 => {
                 // Ctrl+W / Option+Delete — erase last word
                 buffer.pop_word();
-                let lbl = effective_label(&ctrl_v_image);
-                display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+                display_rows = redraw!();
             }
             0x1b => {
                 let sequence = read_escape_sequence(&mut input)?;
-                if sequence == b"[200~" {
-                    let paste = normalize_pasted_text(read_bracketed_paste(&mut input)?);
-                    push_paste(&mut buffer, paste, paste_count);
-                    let lbl = effective_label(&ctrl_v_image);
-                    display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+                match sequence.as_slice() {
+                    b"[200~" => {
+                        // Bracketed paste
+                        let paste = normalize_pasted_text(read_bracketed_paste(&mut input)?);
+                        push_paste(&mut buffer, paste, paste_count);
+                        display_rows = redraw!();
+                    }
+                    b"[A" => {
+                        // Up arrow — previous history entry
+                        if input_history.is_empty() {
+                            continue;
+                        }
+                        let new_idx = match hist_idx {
+                            None => {
+                                saved_input = buffer.full.clone();
+                                input_history.len() - 1
+                            }
+                            Some(0) => 0,
+                            Some(i) => i - 1,
+                        };
+                        hist_idx = Some(new_idx);
+                        buffer = PromptBuffer::default();
+                        buffer.push_text(&input_history[new_idx].clone());
+                        display_rows = redraw!();
+                    }
+                    b"[B" => {
+                        // Down arrow — next history entry / back to live input
+                        match hist_idx {
+                            None => {}
+                            Some(i) if i + 1 >= input_history.len() => {
+                                hist_idx = None;
+                                let text = std::mem::take(&mut saved_input);
+                                buffer = PromptBuffer::default();
+                                buffer.push_text(&text);
+                                display_rows = redraw!();
+                            }
+                            Some(i) => {
+                                hist_idx = Some(i + 1);
+                                buffer = PromptBuffer::default();
+                                buffer.push_text(&input_history[i + 1].clone());
+                                display_rows = redraw!();
+                            }
+                        }
+                    }
+                    b"[C" => {
+                        // Right arrow
+                        buffer.move_right();
+                        let _ = position_prompt_cursor(
+                            &buffer.display,
+                            buffer.display_cursor_char(),
+                        );
+                    }
+                    b"[D" => {
+                        // Left arrow
+                        buffer.move_left();
+                        let _ = position_prompt_cursor(
+                            &buffer.display,
+                            buffer.display_cursor_char(),
+                        );
+                    }
+                    b"[H" | b"[1~" => {
+                        // Home
+                        buffer.move_home();
+                        let _ = position_prompt_cursor(&buffer.display, 0);
+                    }
+                    b"[F" | b"[4~" => {
+                        // End
+                        buffer.move_end();
+                        let _ = position_prompt_cursor(
+                            &buffer.display,
+                            buffer.display_cursor_char(),
+                        );
+                    }
+                    _ => {}
                 }
             }
             byte if byte >= 0x20 && byte != 0x7f => {
                 if let Some(ch) = read_utf8_char(byte, &mut input)? {
                     buffer.push_text(ch.encode_utf8(&mut [0; 4]));
-                    let lbl = effective_label(&ctrl_v_image);
-                    display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+                    display_rows = redraw!();
                 }
             }
             _ => {}
