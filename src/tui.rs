@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::{Duration, Instant}};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -45,10 +45,11 @@ pub enum TuiEvent {
 enum Msg {
     User { text: String },
     Assistant { text: String },
-    Tool { done: bool, ok: bool, text: String },
+    Tool { done: bool, ok: bool, text: String, elapsed_ms: Option<u128> },
     FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)> },
     Error(String),
     System(String),
+    Separator, // thin line between turns — "AI is done, your turn"
 }
 
 #[derive(Debug)]
@@ -83,6 +84,9 @@ pub struct App {
 
     // pending turn tracking
     pending_prompt: String,
+    streaming_started_at: Option<Instant>,
+    tool_started_at: Option<Instant>,
+    unread_count: usize, // messages added while scrolled away
 
     // input
     input: String,
@@ -166,6 +170,9 @@ impl App {
             plan_tasks: vec![],
             plan_done: vec![],
             pending_prompt: String::new(),
+            streaming_started_at: None,
+            tool_started_at: None,
+            unread_count: 0,
 
             input: String::new(),
             input_cursor: 0,
@@ -330,6 +337,7 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind) {
             app.scroll = app.scroll.saturating_add(3);
             if app.scroll >= app.total_lines {
                 app.auto_scroll = true;
+                app.unread_count = 0;
             }
         }
         _ => {}
@@ -750,23 +758,30 @@ async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
 async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
     match ev {
         TuiEvent::Token(text) => {
+            if app.streaming_started_at.is_none() {
+                app.streaming_started_at = Some(Instant::now());
+            }
             app.streaming_buf.push_str(&text);
-            app.auto_scroll = true;
+            if app.auto_scroll {
+                app.scroll = usize::MAX;
+            } else {
+                app.unread_count += 1;
+            }
         }
         TuiEvent::Status(msg) => {
             app.tool_status = msg;
         }
         TuiEvent::ToolCall(summary) => {
             flush_streaming_buf(app);
-            // Commit any previous pending tool (shouldn't happen, but be safe)
             commit_pending_tool(app, true);
             app.pending_tool = Some(PendingTool { summary: summary.clone() });
+            app.tool_started_at = Some(Instant::now());
             app.tool_status = summary;
         }
         TuiEvent::ToolDone { summary, ok } => {
-            // Commit the pending tool with its final status
+            let elapsed_ms = app.tool_started_at.take().map(|t| t.elapsed().as_millis());
             app.pending_tool = Some(PendingTool { summary });
-            commit_pending_tool(app, ok);
+            commit_pending_tool_timed(app, ok, elapsed_ms);
             app.tool_status = "Thinking".to_string();
         }
         TuiEvent::FileOp { verb, path, added, removed, diff } => {
@@ -815,8 +830,13 @@ fn flush_streaming_buf(app: &mut App) {
 
 /// Commit a pending tool call to the message history with its final status.
 fn commit_pending_tool(app: &mut App, ok: bool) {
+    let elapsed = app.tool_started_at.take().map(|t| t.elapsed().as_millis());
+    commit_pending_tool_timed(app, ok, elapsed);
+}
+
+fn commit_pending_tool_timed(app: &mut App, ok: bool, elapsed_ms: Option<u128>) {
     if let Some(tool) = app.pending_tool.take() {
-        app.messages.push(Msg::Tool { done: true, ok, text: tool.summary });
+        app.messages.push(Msg::Tool { done: true, ok, text: tool.summary, elapsed_ms });
     }
 }
 
@@ -840,6 +860,12 @@ fn finish_turn(app: &mut App) {
     }
     app.mode = Mode::Input;
     app.tool_status.clear();
+    app.streaming_started_at = None;
+    app.tool_started_at = None;
+    // Add a separator so the user sees clearly the AI is done
+    if !app.history.is_empty() {
+        app.messages.push(Msg::Separator);
+    }
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -871,11 +897,11 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         String::new()
     };
     let left = format!(" anveesa v{version}{token_str}");
-    let right = format!("{} · {}  ", app.provider, app.model);
+    let right = format!(" {} · {} ", app.provider, app.model);
     let gap = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
     let title = format!("{left}{}{right}", " ".repeat(gap));
     frame.render_widget(
-        Paragraph::new(title).style(Style::default().fg(Color::Black).bg(Color::Rgb(97, 175, 239))),
+        Paragraph::new(title).style(Style::default().fg(Color::Rgb(20, 20, 30)).bg(Color::Rgb(97, 175, 239))),
         area,
     );
 }
@@ -900,7 +926,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
                 lines.push(Line::from(""));
             }
-            Msg::Tool { done, ok, text } => {
+            Msg::Tool { done, ok, text, elapsed_ms } => {
                 let (icon, color) = if !done {
                     ("⠋", Color::DarkGray)
                 } else if *ok {
@@ -908,10 +934,15 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     ("✗", Color::Rgb(224, 108, 117))
                 };
-                lines.push(Line::from(Span::styled(
-                    format!("  {icon} {text}"),
-                    Style::default().fg(color),
-                )));
+                let elapsed_str = match elapsed_ms {
+                    Some(ms) if *ms < 1000 => format!("  {ms}ms"),
+                    Some(ms) => format!("  {:.1}s", *ms as f64 / 1000.0),
+                    None => String::new(),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {icon} {text}"), Style::default().fg(color)),
+                    Span::styled(elapsed_str, Style::default().fg(Color::Rgb(80, 80, 100))),
+                ]));
                 lines.push(Line::from(""));
             }
             Msg::FileOp { verb, path, added, removed, diff } => {
@@ -959,21 +990,36 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
                 lines.push(Line::from(""));
             }
+            Msg::Separator => {
+                // Thin line between turns — signals "AI is done, your turn"
+                let line_width = width.saturating_sub(2);
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", "─".repeat(line_width.min(60))),
+                    Style::default().fg(Color::Rgb(45, 45, 65)),
+                )));
+                lines.push(Line::from(""));
+            }
         }
     }
 
-    // Live pending tool (running, not yet committed)
+    // Live pending tool (running, not yet committed) — animated with elapsed time
     if let Some(tool) = &app.pending_tool {
         let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let dot = dots[app.spinner_frame % dots.len()];
-        lines.push(Line::from(Span::styled(
-            format!("  {dot} {}", tool.summary),
-            Style::default().fg(Color::DarkGray),
-        )));
+        let elapsed = app.tool_started_at
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
+        let elapsed_str = if elapsed < 0.5 { String::new() } else { format!(" ({:.1}s)", elapsed) };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {dot} {}{}", tool.summary, elapsed_str),
+                Style::default().fg(Color::Rgb(180, 140, 60)),
+            ),
+        ]));
         lines.push(Line::from(""));
     }
 
-    // In-progress streaming
+    // In-progress streaming — assistant message being built token by token
     if !app.streaming_buf.is_empty() || (app.mode == Mode::Streaming && app.pending_tool.is_none()) {
         lines.push(assistant_header(&app.model));
         if !app.streaming_buf.is_empty() {
@@ -983,10 +1029,14 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let dot = dots[app.spinner_frame % dots.len()];
-            let status = if app.tool_status.is_empty() { "Thinking" } else { &app.tool_status };
+            let elapsed = app.streaming_started_at
+                .map(|t| t.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
+            let elapsed_str = if elapsed < 0.5 { String::new() } else { format!(" ({:.1}s)", elapsed) };
+            let status = if app.tool_status.is_empty() { "Thinking" } else { app.tool_status.as_str() };
             lines.push(Line::from(Span::styled(
-                format!("    {dot} {status}"),
-                Style::default().fg(Color::DarkGray),
+                format!("    {dot} {status}{elapsed_str}"),
+                Style::default().fg(Color::Rgb(180, 140, 60)),
             )));
         }
         lines.push(Line::from(""));
@@ -1002,8 +1052,21 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     app.scroll = scroll;
 
+    // "↓ unread" badge overlay when scrolled away
+    let mut widget_lines = lines;
+    if !app.auto_scroll && app.unread_count > 0 {
+        let badge = format!(" ↓ {} new ", app.unread_count);
+        widget_lines.push(Line::from(Span::styled(
+            badge,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(97, 175, 239))
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
     frame.render_widget(
-        Paragraph::new(lines).scroll((scroll as u16, 0)),
+        Paragraph::new(widget_lines).scroll((scroll as u16, 0)),
         area,
     );
 }
@@ -1023,11 +1086,33 @@ fn assistant_header(model: &str) -> Line<'static> {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
+    // Border color reflects mode: ready=green, streaming=yellow, confirming=orange
+    let border_color = match app.mode {
+        Mode::Input     => Color::Rgb(152, 195, 121), // green — "your turn"
+        Mode::Streaming => Color::Rgb(229, 192, 123), // yellow — "thinking"
+        Mode::Confirming=> Color::Rgb(224, 108, 117), // red — "needs decision"
+    };
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)));
+        .border_style(Style::default().fg(border_color));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    if app.mode != Mode::Input {
+        // Don't show cursor or text while AI is working
+        return;
+    }
+
+    if app.input.is_empty() && app.pending_image.is_none() {
+        // Placeholder hint
+        frame.render_widget(
+            Paragraph::new("  ❯ Ask anything…  (↑/↓ history · Ctrl+V paste image)")
+                .style(Style::default().fg(Color::Rgb(60, 60, 80))),
+            inner,
+        );
+        frame.set_cursor_position((inner.x + 4, inner.y));
+        return;
+    }
 
     let label = if app.pending_image.is_some() { "  [📎] ❯ " } else { "  ❯ " };
     let label_w = label.chars().count();
@@ -1038,7 +1123,6 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         inner,
     );
 
-    // Position cursor
     let cursor_chars = label_w + app.input[..app.input_cursor].chars().count();
     let w = inner.width.max(1) as usize;
     frame.set_cursor_position((
@@ -1048,25 +1132,51 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
-    let (text, style) = if app.mode == Mode::Confirming {
-        let summary = app.confirm.as_ref().map(|c| c.summary.as_str()).unwrap_or("?");
-        (
-            format!(" ⚠  Allow: {summary}   [y]es  [a]ll  [n]o "),
-            Style::default().fg(Color::Black).bg(Color::Rgb(229, 192, 123)),
-        )
-    } else {
-        let mode_tag = if app.mouse_capture { "[scroll]" } else { "[select]" };
-        let hints = "Ctrl+M mode · /copy · /help";
-        let left = format!(" {} {mode_tag}", app.cwd);
-        let right = format!("{hints} ");
-        let gap = (area.width as usize)
-            .saturating_sub(left.chars().count() + right.chars().count());
-        (
-            format!("{left}{}{right}", " ".repeat(gap)),
-            Style::default().fg(Color::DarkGray).bg(Color::Rgb(30, 30, 46)),
-        )
-    };
-    frame.render_widget(Paragraph::new(text).style(style), area);
+    match app.mode {
+        Mode::Confirming => {
+            let summary = app.confirm.as_ref().map(|c| c.summary.as_str()).unwrap_or("?");
+            let text = format!(" ⚠  {summary}   [y] allow once   [a] allow all   [n] deny ");
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().fg(Color::Black).bg(Color::Rgb(224, 108, 117))),
+                area,
+            );
+        }
+        Mode::Streaming => {
+            let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let dot = dots[app.spinner_frame % dots.len()];
+            let elapsed = app.streaming_started_at
+                .map(|t| t.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
+            let state = if !app.tool_status.is_empty() {
+                format!("{dot} {}  ({:.1}s)", app.tool_status, elapsed)
+            } else {
+                format!("{dot} Thinking…  ({:.1}s)", elapsed)
+            };
+            let left = format!(" {state}");
+            let right = format!(" {}  Ctrl+C cancel ", app.cwd);
+            let gap = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
+            let text = format!("{left}{}{right}", " ".repeat(gap));
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().fg(Color::Rgb(229, 192, 123)).bg(Color::Rgb(30, 28, 20))),
+                area,
+            );
+        }
+        Mode::Input => {
+            let mode_icon = if app.mouse_capture { "⊙" } else { "⊕" };
+            let mode_label = if app.mouse_capture { "scroll" } else { "select" };
+            let left = format!(" ● Ready  {}", app.cwd);
+            let right = format!(" {mode_icon} {mode_label}  /help ");
+            let gap = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
+            let text = format!("{left}{}{right}", " ".repeat(gap));
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().fg(Color::Rgb(152, 195, 121)).bg(Color::Rgb(20, 30, 20))),
+                area,
+            );
+        }
+    }
 }
 
 // ── Text formatting ───────────────────────────────────────────────────────────
