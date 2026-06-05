@@ -143,15 +143,22 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
 
     loop {
         print_input_separator(is_tty, width);
-        let line = match read_prompt_line(&label, width, &mut paste_count) {
-            Ok(PromptRead::Line(line)) => line,
-            Ok(PromptRead::Interrupted) => continue,
-            Ok(PromptRead::Eof) => {
-                println!();
-                break;
-            }
-            Err(error) => return Err(error).context("failed to read interactive prompt"),
-        };
+        let (line, ctrl_v_image) =
+            match read_prompt_line(&label, width, &mut paste_count, images_available) {
+                Ok(PromptRead::Line(line, img)) => (line, img),
+                Ok(PromptRead::Interrupted) => continue,
+                Ok(PromptRead::Eof) => {
+                    println!();
+                    break;
+                }
+                Err(error) => return Err(error).context("failed to read interactive prompt"),
+            };
+
+        // Ctrl+V image takes precedence over a previously pending image.
+        if let Some(img) = ctrl_v_image {
+            last_image_fp = Some(image_fingerprint(&img));
+            pending_image = Some(img);
+        }
 
         let prompt = line.trim().to_string();
         if prompt.is_empty() {
@@ -1313,7 +1320,7 @@ fn print_session_header(
 }
 
 enum PromptRead {
-    Line(String),
+    Line(String, Option<ImageAttachment>),
     Interrupted,
     Eof,
 }
@@ -1466,13 +1473,28 @@ impl RawPromptMode {
     }
 }
 
-fn read_prompt_line(label: &str, width: usize, paste_count: &mut usize) -> Result<PromptRead> {
+fn read_prompt_line(
+    label: &str,
+    width: usize,
+    paste_count: &mut usize,
+    images_available: bool,
+) -> Result<PromptRead> {
     let _raw_mode = RawPromptMode::enter()?;
     let mut input = io::stdin().lock();
     let mut buffer = PromptBuffer::default();
     let mut display_rows = 1usize;
+    let mut ctrl_v_image: Option<ImageAttachment> = None;
 
-    print!("{label}");
+    // Compose the visible prompt label, optionally prefixed with an image indicator.
+    let effective_label = |img: &Option<ImageAttachment>| -> String {
+        if img.is_some() {
+            format!("\x1b[2m[📎]\x1b[0m {label}")
+        } else {
+            label.to_string()
+        }
+    };
+
+    print!("{}", effective_label(&ctrl_v_image));
     io::stdout().flush().context("failed to write prompt")?;
 
     loop {
@@ -1484,9 +1506,11 @@ fn read_prompt_line(label: &str, width: usize, paste_count: &mut usize) -> Resul
         match byte[0] {
             b'\r' | b'\n' => {
                 println!();
-                return Ok(PromptRead::Line(buffer.full));
+                return Ok(PromptRead::Line(buffer.full, ctrl_v_image));
             }
             3 => {
+                // Ctrl+C — discard any pasted image too
+                ctrl_v_image = None;
                 println!("^C");
                 return Ok(PromptRead::Interrupted);
             }
@@ -1494,30 +1518,51 @@ fn read_prompt_line(label: &str, width: usize, paste_count: &mut usize) -> Resul
             8 | 127 => {
                 // Backspace
                 buffer.pop_last();
-                display_rows = redraw_prompt_line(label, &buffer.display, display_rows, width)?;
+                let lbl = effective_label(&ctrl_v_image);
+                display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
             }
             21 => {
                 // Ctrl+U / Cmd+Delete — erase entire line
                 buffer.clear_all();
-                display_rows = redraw_prompt_line(label, &buffer.display, display_rows, width)?;
+                let lbl = effective_label(&ctrl_v_image);
+                display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+            }
+            22 if images_available => {
+                // Ctrl+V — paste image from clipboard
+                match grab_clipboard_image() {
+                    Some(img) => {
+                        ctrl_v_image = Some(img);
+                        let lbl = effective_label(&ctrl_v_image);
+                        display_rows =
+                            redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
+                    }
+                    None => {
+                        // No image in clipboard — ring the bell
+                        print!("\x07");
+                        let _ = io::stdout().flush();
+                    }
+                }
             }
             23 => {
                 // Ctrl+W / Option+Delete — erase last word
                 buffer.pop_word();
-                display_rows = redraw_prompt_line(label, &buffer.display, display_rows, width)?;
+                let lbl = effective_label(&ctrl_v_image);
+                display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
             }
             0x1b => {
                 let sequence = read_escape_sequence(&mut input)?;
                 if sequence == b"[200~" {
                     let paste = normalize_pasted_text(read_bracketed_paste(&mut input)?);
                     push_paste(&mut buffer, paste, paste_count);
-                    display_rows = redraw_prompt_line(label, &buffer.display, display_rows, width)?;
+                    let lbl = effective_label(&ctrl_v_image);
+                    display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
                 }
             }
             byte if byte >= 0x20 && byte != 0x7f => {
                 if let Some(ch) = read_utf8_char(byte, &mut input)? {
                     buffer.push_text(ch.encode_utf8(&mut [0; 4]));
-                    display_rows = redraw_prompt_line(label, &buffer.display, display_rows, width)?;
+                    let lbl = effective_label(&ctrl_v_image);
+                    display_rows = redraw_prompt_line(&lbl, &buffer.display, display_rows, width)?;
                 }
             }
             _ => {}
