@@ -258,12 +258,14 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "fetch_url",
-                "description": "Fetch the content of a URL and return it as plain text. Strips HTML tags automatically.",
+                "description": "Fetch a URL. mode=\"text\" (default): returns plain text with HTML tags stripped. mode=\"raw\": returns the full HTML source unchanged. mode=\"deep\": returns HTML source PLUS the full content of every linked CSS file (and JS bundles if include_js=true) in one call — use this when you need to inspect design tokens, Tailwind classes, color variables, font imports, or component structure without multiple round-trips.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": { "type": "string", "description": "URL to fetch." },
-                        "max_chars": { "type": "integer", "description": "Max characters to return (default 40000)." }
+                        "mode": { "type": "string", "description": "\"text\" (default, strips HTML), \"raw\" (full HTML source), \"deep\" (HTML source + fetch all linked CSS assets, and JS if include_js=true)." },
+                        "max_chars": { "type": "integer", "description": "Max chars per resource (default 40000 for text, 60000 for raw/deep HTML, 30000 per asset)." },
+                        "include_js": { "type": "boolean", "description": "deep mode only — also fetch linked JS bundles (default false; bundles can be large)." }
                     },
                     "required": ["url"]
                 }
@@ -987,6 +989,84 @@ fn scrape_ddg_html(html: &str, max: usize) -> Vec<Value> {
     results
 }
 
+fn tag_attr(tag: &str, attr: &str) -> Option<String> {
+    let dq = format!("{attr}=\"");
+    let sq = format!("{attr}='");
+    if let Some(s) = tag.find(&dq) {
+        let start = s + dq.len();
+        tag[start..].find('"').map(|e| tag[start..start + e].to_string())
+    } else if let Some(s) = tag.find(&sq) {
+        let start = s + sq.len();
+        tag[start..].find('\'').map(|e| tag[start..start + e].to_string())
+    } else {
+        None
+    }
+}
+
+fn url_origin(url: &str) -> String {
+    let skip = if url.starts_with("https://") { 8 } else if url.starts_with("http://") { 7 } else { return String::new() };
+    let scheme = &url[..skip - 3];
+    let host = url[skip..].split('/').next().unwrap_or("");
+    format!("{scheme}://{host}")
+}
+
+fn url_base_path(url: &str) -> String {
+    let skip = if url.starts_with("https://") { 8 } else if url.starts_with("http://") { 7 } else { return "/".to_string() };
+    let rest = &url[skip..];
+    let path = rest.split_once('/').map(|(_, p)| format!("/{p}")).unwrap_or_default();
+    path.rfind('/').map(|i| path[..i + 1].to_string()).unwrap_or_else(|| "/".to_string())
+}
+
+fn resolve_asset_url(href: &str, origin: &str, base_path: &str) -> Option<String> {
+    let h = href.trim();
+    if h.is_empty() { return None; }
+    if h.starts_with("http://") || h.starts_with("https://") {
+        Some(h.to_string())
+    } else if h.starts_with("//") {
+        let scheme = if origin.starts_with("https") { "https" } else { "http" };
+        Some(format!("{scheme}:{h}"))
+    } else if h.starts_with('/') {
+        if origin.is_empty() { None } else { Some(format!("{origin}{h}")) }
+    } else if !origin.is_empty() {
+        Some(format!("{origin}{base_path}{h}"))
+    } else {
+        None
+    }
+}
+
+fn extract_asset_urls(html: &str, base_url: &str, include_js: bool) -> Vec<String> {
+    let origin = url_origin(base_url);
+    let base_path = url_base_path(base_url);
+    let mut urls: Vec<String> = Vec::new();
+    let mut pos = 0;
+
+    while pos < html.len() {
+        let Some(lt) = html[pos..].find('<') else { break };
+        let abs = pos + lt;
+        let Some(gt) = html[abs..].find('>') else { break };
+        let tag = &html[abs..abs + gt + 1];
+        let tag_lo = tag.to_lowercase();
+        pos = abs + gt + 1;
+
+        let href = if tag_lo.starts_with("<link") {
+            let rel = tag_attr(&tag_lo, "rel").unwrap_or_default();
+            let as_ = tag_attr(&tag_lo, "as").unwrap_or_default();
+            if rel == "stylesheet" || (rel == "preload" && as_ == "style") {
+                tag_attr(tag, "href").or_else(|| tag_attr(&tag_lo, "href"))
+            } else { None }
+        } else if include_js && tag_lo.starts_with("<script") {
+            tag_attr(tag, "src").or_else(|| tag_attr(&tag_lo, "src"))
+        } else { None };
+
+        if let Some(h) = href {
+            if let Some(resolved) = resolve_asset_url(&h, &origin, &base_path) {
+                if !urls.contains(&resolved) { urls.push(resolved); }
+            }
+        }
+    }
+    urls
+}
+
 fn extract_attr<'a>(html: &'a str, attr: &str) -> Option<&'a str> {
     let key = format!("{attr}=\"");
     let start = html.find(&key)? + key.len();
@@ -1027,14 +1107,18 @@ async fn fetch_url(arguments: &str) -> Result<Value> {
         url: String,
         #[serde(default)]
         max_chars: Option<usize>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        include_js: Option<bool>,
     }
     let args: Args = parse_args(arguments)?;
-    let url = args.url.trim();
+    let url = args.url.trim().to_string();
     if url.is_empty() { bail!("url is required"); }
-    let max_chars = args.max_chars.unwrap_or(40_000);
+    let mode = args.mode.as_deref().unwrap_or("text").to_string();
 
     let response = http_client()
-        .get(url)
+        .get(&url)
         .send()
         .await
         .with_context(|| format!("failed to fetch {url}"))?;
@@ -1050,23 +1134,98 @@ async fn fetch_url(arguments: &str) -> Result<Value> {
         .to_string();
 
     let body = response.text().await.context("failed to read response body")?;
-    let text = if content_type.contains("html") || content_type.contains("xml") {
-        html_to_text(&body)
-    } else {
-        body
-    };
 
-    let char_count = text.chars().count();
-    let truncated = char_count > max_chars;
-    let text: String = text.chars().take(max_chars).collect();
+    match mode.as_str() {
+        "raw" => {
+            let max = args.max_chars.unwrap_or(80_000);
+            let char_count = body.chars().count();
+            let truncated = char_count > max;
+            let html: String = body.chars().take(max).collect();
+            Ok(json!({
+                "ok": true,
+                "url": url,
+                "content_type": content_type,
+                "html": html,
+                "char_count": char_count,
+                "truncated": truncated,
+            }))
+        }
+        "deep" => {
+            const ASSET_MAX: usize = 30_000;
+            const MAX_ASSETS: usize = 10;
+            let html_max = args.max_chars.unwrap_or(60_000);
+            let include_js = args.include_js.unwrap_or(false);
 
-    Ok(json!({
-        "ok": true,
-        "url": url,
-        "content_type": content_type,
-        "text": text,
-        "truncated": truncated,
-    }))
+            let asset_urls: Vec<String> = extract_asset_urls(&body, &url, include_js)
+                .into_iter()
+                .take(MAX_ASSETS)
+                .collect();
+
+            let mut handles = Vec::new();
+            for asset_url in asset_urls {
+                handles.push(tokio::spawn(async move {
+                    let Ok(resp) = http_client().get(&asset_url).send().await else { return None; };
+                    if !resp.status().is_success() { return None; }
+                    let ct = resp.headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let Ok(content) = resp.text().await else { return None; };
+                    let kind = if ct.contains("css") || asset_url.ends_with(".css") { "css" }
+                        else if ct.contains("javascript") || asset_url.contains(".js") { "js" }
+                        else { "other" };
+                    let char_count = content.chars().count();
+                    let truncated = char_count > ASSET_MAX;
+                    let trimmed: String = content.chars().take(ASSET_MAX).collect();
+                    Some(json!({
+                        "url": asset_url,
+                        "type": kind,
+                        "char_count": char_count,
+                        "truncated": truncated,
+                        "content": trimmed,
+                    }))
+                }));
+            }
+
+            let mut assets: Vec<Value> = Vec::new();
+            for h in handles {
+                if let Ok(Some(a)) = h.await { assets.push(a); }
+            }
+
+            let html_chars = body.chars().count();
+            let html_truncated = html_chars > html_max;
+            let html: String = body.chars().take(html_max).collect();
+
+            Ok(json!({
+                "ok": true,
+                "url": url,
+                "html": html,
+                "html_chars": html_chars,
+                "html_truncated": html_truncated,
+                "assets": assets,
+            }))
+        }
+        _ => {
+            // "text" mode — current behaviour
+            let max = args.max_chars.unwrap_or(40_000);
+            let text = if content_type.contains("html") || content_type.contains("xml") {
+                html_to_text(&body)
+            } else {
+                body
+            };
+            let char_count = text.chars().count();
+            let truncated = char_count > max;
+            let text: String = text.chars().take(max).collect();
+            Ok(json!({
+                "ok": true,
+                "url": url,
+                "content_type": content_type,
+                "text": text,
+                "truncated": truncated,
+            }))
+        }
+    }
 }
 
 fn html_to_text(html: &str) -> String {
