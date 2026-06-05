@@ -552,8 +552,8 @@ fn s7_is_write_tool() {
     assert!(!is_write_tool("EDIT_FILE"));
     assert!(!is_write_tool("RUN_COMMAND"));
     assert!(!is_write_tool("create_directory"));
-    assert!(!is_write_tool("delete_file"));
-    assert!(!is_write_tool("move_file"));
+    assert!(is_write_tool("delete_file"));
+    assert!(is_write_tool("move_file"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

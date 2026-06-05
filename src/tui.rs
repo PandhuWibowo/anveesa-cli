@@ -514,6 +514,17 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
             }
         }
 
+        // j/k vim-style scroll when input is empty
+        KeyCode::Char('j') if app.input.is_empty() => {
+            app.scroll = app.scroll.saturating_add(3);
+            if app.scroll >= app.total_lines { app.auto_scroll = true; app.unread_count = 0; }
+            else { app.auto_scroll = false; }
+        }
+        KeyCode::Char('k') if app.input.is_empty() => {
+            app.auto_scroll = false;
+            app.scroll = app.scroll.saturating_sub(3);
+        }
+
         // Printable characters
         KeyCode::Char(c) => {
             let s = c.to_string();
@@ -551,11 +562,13 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
         }
         "/help" => {
             app.messages.push(Msg::System(
-                "Commands: /clear  /copy  /export [path]  /model [name]  /provider [name]  /status  /exit\n\
+                "Commands: /clear  /compact  /copy  /export [path]\n\
+                 /model [name]  /provider [name]  /status  /exit\n\
+                 \n\
                  Keys: ↑/↓ history  ←/→ cursor  Home/End  Shift+Enter newline\n\
-                 Ctrl+W delete-word  Ctrl+U clear-line  Ctrl+V paste image\n\
-                 Ctrl+M toggle scroll/select mode  PageUp/Dn scroll\n\
-                 [scroll] = mouse wheel scrolls  [select] = mouse selects text to copy".into(),
+                 j/k scroll (when input empty)  PageUp/Dn scroll\n\
+                 Ctrl+W delete-word  Ctrl+U clear-line  Ctrl+V paste\n\
+                 Ctrl+M toggle scroll/select mode".into(),
             ));
             app.input.clear();
             app.input_cursor = 0;
@@ -589,6 +602,34 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
                     }
                 }
                 None => app.messages.push(Msg::System("No assistant response to copy yet.".into())),
+            }
+            app.input.clear();
+            app.input_cursor = 0;
+            true
+        }
+        "/compact" => {
+            // Keep only the last 10 turns, drop older history to free context
+            let keep = 10usize;
+            let total_turns = app.history.len() / 2;
+            if total_turns <= keep {
+                app.messages.push(Msg::System(format!(
+                    "Conversation has {total_turns} turn(s) — nothing to compact yet (threshold: {keep})."
+                )));
+            } else {
+                let drop_turns = total_turns - keep;
+                let drop_msgs = drop_turns * 2;
+                app.history.drain(..drop_msgs);
+                // Also remove older messages from the display (keep separators and last N turns)
+                let msg_count = app.messages.len();
+                if msg_count > keep * 3 {
+                    app.messages.drain(..(msg_count - keep * 3));
+                }
+                app.seen_paths.clear(); // refresh seen paths for the new context window
+                app.messages.insert(0, Msg::System(format!(
+                    "Context compacted: dropped {drop_turns} older turn(s), keeping the last {keep}. \
+                     Use /clear to start fresh."
+                )));
+                app.messages.push(Msg::Separator);
             }
             app.input.clear();
             app.input_cursor = 0;
@@ -1085,13 +1126,25 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         lines.push(Line::from(""));
     }
 
+    // Add bottom padding so wrapped last lines are never cut off by viewport
+    for _ in 0..3 { lines.push(Line::from("")); }
+
+    // Estimate visual rows (accounting for line wrapping) for accurate auto-scroll
+    let visual_rows: usize = if width == 0 { lines.len() } else {
+        lines.iter().map(|l| {
+            let chars: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            if chars == 0 { 1 } else { chars.div_ceil(width) }
+        }).sum()
+    };
+
     let total = lines.len();
     app.total_lines = total;
     let visible = area.height as usize;
     let scroll = if app.auto_scroll || app.scroll == usize::MAX {
-        total.saturating_sub(visible)
+        // Use visual-row estimate to scroll accurately to the bottom
+        visual_rows.saturating_sub(visible)
     } else {
-        app.scroll.min(total.saturating_sub(visible))
+        app.scroll.min(total.saturating_sub(1))
     };
     app.scroll = scroll;
 

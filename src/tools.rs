@@ -60,6 +60,8 @@ pub fn is_write_tool(name: &str) -> bool {
     matches!(
         name,
         "create_dir" | "write_file" | "edit_file" | "run_command"
+        | "delete_file" | "move_file" | "copy_file"
+        | "git_commit" | "git_stash" | "git_branch"
     )
 }
 
@@ -85,15 +87,28 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
             field("root").if_empty(".")
         ),
         "read_file" => format!("read file {}", field("path")),
-        "web_search" => format!("web search `{}`", field("query")),
-        "fetch_url"  => format!("fetch {}", field("url")),
-        "git_status" => "git status".to_string(),
-        "git_diff"   => {
+        "web_search"  => format!("web search `{}`", field("query")),
+        "fetch_url"   => format!("fetch {}", field("url")),
+        "git_status"  => "git status".to_string(),
+        "git_diff"    => {
             let path = field("path");
             if path.is_empty() { "git diff".to_string() } else { format!("git diff {path}") }
         }
-        "git_log"    => "git log".to_string(),
-        "create_dir" => format!("create directory {}", field("path")),
+        "git_log"     => "git log".to_string(),
+        "git_blame"   => format!("git blame {}", field("path")),
+        "git_show"    => format!("git show {}", field("ref").if_empty("HEAD")),
+        "git_stash"   => format!("git stash {}", field("action").if_empty("list")),
+        "git_branch"  => {
+            if !field("create").is_empty() { format!("git branch -b {}", field("create")) }
+            else if !field("checkout").is_empty() { format!("git checkout {}", field("checkout")) }
+            else if !field("delete").is_empty() { format!("git branch -d {}", field("delete")) }
+            else { "git branch".to_string() }
+        }
+        "git_commit"  => format!("git commit {}", field("message")),
+        "delete_file" => format!("delete {}", field("path")),
+        "move_file"   => format!("move {} → {}", field("from"), field("to")),
+        "copy_file"   => format!("copy {} → {}", field("from"), field("to")),
+        "create_dir"  => format!("create directory {}", field("path")),
         "write_file" => format!("write file {}", field("path")),
         "edit_file" => format!("edit file {}", field("path")),
         "run_command" => format!("run command `{}`", field("command")),
@@ -267,8 +282,38 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "n":    { "type": "integer", "description": "Number of commits to show (default 20, max 100)." },
-                        "path": { "type": "string",  "description": "Limit log to commits touching this path." }
+                        "n":    { "type": "integer", "description": "Number of commits (default 20, max 100)." },
+                        "path": { "type": "string",  "description": "Limit to commits touching this path." }
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_blame",
+                "description": "Show who last modified each line of a file (git blame).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path":       { "type": "string",  "description": "File path to blame." },
+                        "start_line": { "type": "integer", "description": "First line (1-based)." },
+                        "end_line":   { "type": "integer", "description": "Last line (1-based)." }
+                    },
+                    "required": ["path"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_show",
+                "description": "Show the contents or diff of a specific commit or object.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref":  { "type": "string", "description": "Commit ref (e.g. HEAD, abc123, HEAD~2). Default HEAD." },
+                        "path": { "type": "string", "description": "Limit output to this file." }
                     }
                 }
             }
@@ -326,7 +371,7 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
                 "type": "function",
                 "function": {
                     "name": "run_command",
-                    "description": "Run a shell command in the terminal cwd and return its output. Use for builds, tests, git, and similar tasks.",
+                    "description": "Run a shell command in the terminal cwd and return its output. Use for builds, tests, and tasks not covered by other tools.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -334,6 +379,94 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
                             "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Optional timeout in seconds (default 60)." }
                         },
                         "required": ["command"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "delete_file",
+                    "description": "Delete a file or empty directory. Use with care — this is irreversible.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Path to delete." }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "move_file",
+                    "description": "Move or rename a file or directory.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "from": { "type": "string", "description": "Source path." },
+                            "to":   { "type": "string", "description": "Destination path." }
+                        },
+                        "required": ["from", "to"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "copy_file",
+                    "description": "Copy a file to a new location. Parent directories are created as needed.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "from": { "type": "string", "description": "Source file path." },
+                            "to":   { "type": "string", "description": "Destination path." }
+                        },
+                        "required": ["from", "to"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "git_stash",
+                    "description": "Save or restore git stash. action: push|pop|list|drop.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action":  { "type": "string",  "description": "push, pop, list, or drop." },
+                            "message": { "type": "string",  "description": "Stash message (only for push)." }
+                        }
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "git_branch",
+                    "description": "List, create, checkout, or delete git branches.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "create":   { "type": "string", "description": "Create and switch to a new branch with this name." },
+                            "checkout": { "type": "string", "description": "Switch to an existing branch." },
+                            "delete":   { "type": "string", "description": "Delete a branch." }
+                        }
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "git_commit",
+                    "description": "Create a git commit with the given message. Optionally stage all changes first.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": { "type": "string",  "description": "Commit message." },
+                            "add_all": { "type": "boolean", "description": "Run git add -A before committing." }
+                        },
+                        "required": ["message"]
                     }
                 }
             }),
@@ -351,10 +484,18 @@ pub async fn run(name: &str, arguments: &str) -> String {
         "read_file"  => read_file(arguments).await,
         "web_search" => web_search(arguments).await,
         "fetch_url"  => fetch_url(arguments).await,
-        "git_status" => git_status(arguments).await,
-        "git_diff"   => git_diff(arguments).await,
-        "git_log"    => git_log(arguments).await,
-        "create_dir" => create_dir(arguments).await,
+        "git_status"  => git_status(arguments).await,
+        "git_diff"    => git_diff(arguments).await,
+        "git_log"     => git_log(arguments).await,
+        "git_blame"   => git_blame(arguments).await,
+        "git_show"    => git_show(arguments).await,
+        "git_stash"   => git_stash(arguments).await,
+        "git_branch"  => git_branch(arguments).await,
+        "git_commit"  => git_commit(arguments).await,
+        "delete_file" => delete_file(arguments).await,
+        "move_file"   => move_file(arguments).await,
+        "copy_file"   => copy_file(arguments).await,
+        "create_dir"  => create_dir(arguments).await,
         "write_file" => write_file(arguments).await,
         "edit_file"  => edit_file(arguments).await,
         "run_command" => run_command(arguments).await,
@@ -541,41 +682,150 @@ fn http_client() -> &'static reqwest::Client {
 async fn web_search(arguments: &str) -> Result<Value> {
     let args: WebSearchArgs = parse_args(arguments)?;
     let query = args.query.trim();
-    if query.is_empty() {
-        bail!("query is empty");
-    }
+    if query.is_empty() { bail!("query is empty"); }
 
-    let url = format!(
+    // Try DuckDuckGo instant-answer API first
+    let api_url = format!(
         "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
         percent_encode(query)
     );
-    let response: Value = http_client()
-        .get(&url)
-        .send()
-        .await
-        .context("web search request failed")?
-        .json()
-        .await
-        .context("failed to parse web search response")?;
-
     let mut results = Vec::new();
-    if let Some(abstract_text) = response.get("AbstractText").and_then(Value::as_str)
-        && !abstract_text.is_empty()
-    {
-        results.push(json!({
-            "title": response.get("Heading").and_then(Value::as_str).unwrap_or("DuckDuckGo"),
-            "snippet": abstract_text,
-            "url": response.get("AbstractURL").and_then(Value::as_str).unwrap_or("")
-        }));
+    if let Ok(resp) = http_client().get(&api_url).send().await {
+        if let Ok(response) = resp.json::<Value>().await {
+            if let Some(abstract_text) = response.get("AbstractText").and_then(Value::as_str)
+                && !abstract_text.is_empty()
+            {
+                results.push(json!({
+                    "title": response.get("Heading").and_then(Value::as_str).unwrap_or(""),
+                    "snippet": abstract_text,
+                    "url": response.get("AbstractURL").and_then(Value::as_str).unwrap_or("")
+                }));
+            }
+            collect_related_topics(response.get("RelatedTopics"), &mut results);
+        }
     }
-    collect_related_topics(response.get("RelatedTopics"), &mut results);
-    results.truncate(8);
 
-    Ok(json!({
-        "ok": true,
-        "query": query,
-        "results": results
-    }))
+    // If instant answer had no results, try DuckDuckGo lite (text-only, more reliable)
+    if results.is_empty() {
+        let lite_url = format!(
+            "https://lite.duckduckgo.com/lite/?q={}",
+            percent_encode(query)
+        );
+        if let Ok(resp) = http_client()
+            .get(&lite_url)
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("User-Agent", "Mozilla/5.0 (compatible; anveesa-cli)")
+            .send()
+            .await
+        {
+            if let Ok(body) = resp.text().await {
+                results = scrape_ddg_lite(&body, 8);
+            }
+        }
+    }
+
+    results.truncate(10);
+    Ok(json!({ "ok": true, "query": query, "results": results }))
+}
+
+/// Scrape DuckDuckGo lite (text-only) results page.
+fn scrape_ddg_lite(html: &str, max: usize) -> Vec<Value> {
+    let mut results = Vec::new();
+    let mut pos = 0;
+    while results.len() < max {
+        // DDG lite uses <a class="result-link"> for result links
+        let Some(a_pos) = html[pos..].find("class=\"result-link\"") else { break };
+        let block = pos + a_pos;
+
+        let url = extract_attr(&html[block..block.min(html.len()).min(block + 300)], "href")
+            .map(|u| clean_ddg_url(u))
+            .unwrap_or_default();
+        let title = extract_tag_text(&html[block..block.min(html.len()).min(block + 300)], "a")
+            .unwrap_or_default();
+
+        // Snippet is in the next table cell after the result
+        let snip_window_end = (block + 800).min(html.len());
+        let snippet = html[block..snip_window_end]
+            .find("result-snippet")
+            .and_then(|s| extract_tag_text(&html[block + s..snip_window_end], "td"))
+            .unwrap_or_default();
+
+        if !title.is_empty() && !url.is_empty() {
+            results.push(json!({ "title": title, "snippet": snippet, "url": url }));
+        }
+        pos = block + 10;
+    }
+    results
+}
+
+/// Scrape DuckDuckGo HTML search results page into structured results.
+fn scrape_ddg_html(html: &str, max: usize) -> Vec<Value> {
+    let mut results = Vec::new();
+    // DDG HTML results are in <div class="result"> blocks
+    // We extract title + snippet by simple string parsing
+    let mut pos = 0;
+    while results.len() < max {
+        // Find a result block
+        let Some(start) = html[pos..].find("class=\"result__a\"") else { break };
+        let block_start = pos + start;
+
+        // Extract href (URL)
+        let url = extract_attr(&html[block_start..block_start + 500], "href")
+            .map(|u| clean_ddg_url(u))
+            .unwrap_or_default();
+
+        // Extract link text (title)
+        let title = extract_tag_text(&html[block_start..block_start + 500], "a")
+            .unwrap_or_default();
+
+        // Find snippet nearby
+        let snippet_window = &html[block_start..std::cmp::min(block_start + 1000, html.len())];
+        let snippet = if let Some(s) = snippet_window.find("result__snippet") {
+            extract_tag_text(&snippet_window[s..std::cmp::min(s + 400, snippet_window.len())], "a")
+                .or_else(|| extract_tag_text(&snippet_window[s..std::cmp::min(s + 400, snippet_window.len())], "span"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if !title.is_empty() && !url.is_empty() {
+            results.push(json!({ "title": title, "snippet": snippet, "url": url }));
+        }
+        pos = block_start + 10;
+    }
+    results
+}
+
+fn extract_attr<'a>(html: &'a str, attr: &str) -> Option<&'a str> {
+    let key = format!("{attr}=\"");
+    let start = html.find(&key)? + key.len();
+    let end = html[start..].find('"')? + start;
+    Some(&html[start..end])
+}
+
+fn extract_tag_text(html: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}");
+    let start = html.find(&open)?;
+    let inner_start = html[start..].find('>')? + start + 1;
+    let close = format!("</{tag}>");
+    let end = html[inner_start..].find(&close)? + inner_start;
+    let raw = &html[inner_start..end];
+    let text = html_to_text(raw);
+    if text.trim().is_empty() { None } else { Some(text.trim().to_string()) }
+}
+
+fn clean_ddg_url(raw: &str) -> String {
+    // DDG wraps URLs in redirect: //duckduckgo.com/l/?uddg=https%3A%2F%2F...
+    if let Some(i) = raw.find("uddg=") {
+        let encoded = &raw[i + 5..];
+        let decoded = encoded.replace("%3A", ":").replace("%2F", "/")
+            .replace("%3F", "?").replace("%3D", "=").replace("%26", "&");
+        decoded.split('&').next().unwrap_or(&decoded).to_string()
+    } else if raw.starts_with("//") {
+        format!("https:{raw}")
+    } else {
+        raw.to_string()
+    }
 }
 
 // ── fetch_url ─────────────────────────────────────────────────────────────────
@@ -743,6 +993,183 @@ async fn git_log(arguments: &str) -> Result<Value> {
         "log": String::from_utf8_lossy(&out.stdout).trim().to_string(),
         "error": if !out.status.success() { Some(String::from_utf8_lossy(&out.stderr).trim().to_string()) } else { None },
     }))
+}
+
+async fn git_blame(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        path: String,
+        #[serde(default)] start_line: Option<usize>,
+        #[serde(default)] end_line: Option<usize>,
+    }
+    let args: Args = parse_args(arguments)?;
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["blame", "-s"]).kill_on_drop(true);
+    if let (Some(s), Some(e)) = (args.start_line, args.end_line) {
+        cmd.arg(format!("-L{s},{e}"));
+    } else if let Some(s) = args.start_line {
+        cmd.arg(format!("-L{s},+50"));
+    }
+    cmd.arg(&args.path);
+    let out = cmd.output().await.context("failed to run git blame")?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let truncated = text.len() > 20_000;
+    Ok(json!({
+        "ok": out.status.success(),
+        "blame": if truncated { &text[..20_000] } else { &text },
+        "truncated": truncated,
+        "error": if !out.status.success() { Some(String::from_utf8_lossy(&out.stderr).trim().to_string()) } else { None },
+    }))
+}
+
+async fn git_show(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize, Default)]
+    struct Args {
+        #[serde(rename = "ref", default)] refspec: Option<String>,
+        #[serde(default)] path: Option<String>,
+    }
+    let args: Args = serde_json::from_str(arguments).unwrap_or_default();
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("show").kill_on_drop(true);
+    cmd.arg(args.refspec.as_deref().unwrap_or("HEAD"));
+    if let Some(p) = &args.path { cmd.arg("--").arg(p); }
+    let out = cmd.output().await.context("failed to run git show")?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let truncated = text.len() > 20_000;
+    Ok(json!({
+        "ok": out.status.success(),
+        "output": if truncated { &text[..20_000] } else { &text },
+        "truncated": truncated,
+    }))
+}
+
+async fn git_stash(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize, Default)]
+    struct Args {
+        #[serde(default)] action: Option<String>,
+        #[serde(default)] message: Option<String>,
+    }
+    let args: Args = serde_json::from_str(arguments).unwrap_or_default();
+    let action = args.action.as_deref().unwrap_or("list");
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("stash").kill_on_drop(true);
+    match action {
+        "push" => {
+            cmd.arg("push");
+            if let Some(m) = &args.message { cmd.arg("-m").arg(m); }
+        }
+        "pop"  => { cmd.arg("pop"); }
+        "drop" => { cmd.arg("drop"); }
+        _      => { cmd.arg("list"); }
+    }
+    let out = cmd.output().await.context("failed to run git stash")?;
+    Ok(json!({
+        "ok": out.status.success(),
+        "output": String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        "error": if !out.status.success() { Some(String::from_utf8_lossy(&out.stderr).trim().to_string()) } else { None },
+    }))
+}
+
+async fn git_branch(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize, Default)]
+    struct Args {
+        #[serde(default)] create:   Option<String>,
+        #[serde(default)] checkout: Option<String>,
+        #[serde(default)] delete:   Option<String>,
+    }
+    let args: Args = serde_json::from_str(arguments).unwrap_or_default();
+    let (git_args, key, val): (Vec<&str>, &str, &str) =
+        if let Some(name) = &args.create {
+            (vec!["checkout", "-b", name], "created", name)
+        } else if let Some(name) = &args.checkout {
+            (vec!["checkout", name], "checked_out", name)
+        } else if let Some(name) = &args.delete {
+            (vec!["branch", "-d", name], "deleted", name)
+        } else {
+            let out = tokio::process::Command::new("git").args(["branch", "-a"]).kill_on_drop(true).output().await.context("failed to run git branch")?;
+            return Ok(json!({ "ok": out.status.success(), "branches": String::from_utf8_lossy(&out.stdout).trim().to_string() }));
+        };
+    let out = tokio::process::Command::new("git").args(&git_args).kill_on_drop(true).output().await.context("failed to run git branch")?;
+    Ok(json!({
+        "ok": out.status.success(),
+        key: val,
+        "error": if !out.status.success() { Some(String::from_utf8_lossy(&out.stderr).trim().to_string()) } else { None },
+    }))
+}
+
+async fn git_commit(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        message: String,
+        #[serde(default)] add_all: bool,
+    }
+    let args: Args = parse_args(arguments)?;
+    if args.message.trim().is_empty() { bail!("commit message is required"); }
+    if args.add_all {
+        tokio::process::Command::new("git").args(["add", "-A"]).kill_on_drop(true).output().await.context("failed to git add")?;
+    }
+    let out = tokio::process::Command::new("git")
+        .args(["commit", "-m", &args.message])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to run git commit")?;
+    Ok(json!({
+        "ok": out.status.success(),
+        "output": String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        "error": if !out.status.success() { Some(String::from_utf8_lossy(&out.stderr).trim().to_string()) } else { None },
+    }))
+}
+
+// ── file management ───────────────────────────────────────────────────────────
+
+async fn delete_file(arguments: &str) -> Result<Value> {
+    let args: PathArgs = parse_args(arguments)?;
+    let path = resolve_writable_path(&args.path.context("path is required")?)?;
+    if is_sensitive_path(&path) {
+        bail!("refusing to delete sensitive path {}", path.display());
+    }
+    if !path.exists() {
+        bail!("{} does not exist", path.display());
+    }
+    let was_dir = path.is_dir();
+    if was_dir {
+        fs::remove_dir_all(&path).with_context(|| format!("failed to delete {}", path.display()))?;
+    } else {
+        fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
+    }
+    Ok(json!({ "ok": true, "path": path.display().to_string(), "was_dir": was_dir }))
+}
+
+async fn move_file(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args { from: String, to: String }
+    let args: Args = parse_args(arguments)?;
+    let from = resolve_writable_path(&args.from)?;
+    let to   = resolve_writable_path(&args.to)?;
+    if is_sensitive_path(&from) || is_sensitive_path(&to) {
+        bail!("refusing to move sensitive path");
+    }
+    if !from.exists() { bail!("{} does not exist", from.display()); }
+    if let Some(parent) = to.parent() { fs::create_dir_all(parent)?; }
+    fs::rename(&from, &to).with_context(|| format!("failed to move {} → {}", from.display(), to.display()))?;
+    Ok(json!({ "ok": true, "from": from.display().to_string(), "to": to.display().to_string() }))
+}
+
+async fn copy_file(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args { from: String, to: String }
+    let args: Args = parse_args(arguments)?;
+    let from_str = args.from.trim();
+    let from = resolve_path(from_str)?;
+    let to   = resolve_writable_path(&args.to)?;
+    if is_sensitive_path(&from) || is_sensitive_path(&to) {
+        bail!("refusing to copy sensitive path");
+    }
+    if !from.is_file() { bail!("{} is not a file", from.display()); }
+    if let Some(parent) = to.parent() { fs::create_dir_all(parent)?; }
+    let bytes = fs::copy(&from, &to).with_context(|| format!("failed to copy {} → {}", from.display(), to.display()))?;
+    Ok(json!({ "ok": true, "from": from.display().to_string(), "to": to.display().to_string(), "bytes": bytes }))
 }
 
 async fn create_dir(arguments: &str) -> Result<Value> {

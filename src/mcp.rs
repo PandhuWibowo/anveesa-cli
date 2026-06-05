@@ -102,17 +102,23 @@ impl McpServer {
         };
         self.send_msg(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await?;
 
-        // Drain notifications until we get our response id
-        loop {
-            let resp = self.recv_msg().await?;
-            if resp.get("id").and_then(|v| v.as_u64()) == Some(id) {
-                if let Some(err) = resp.get("error") {
-                    bail!("MCP error from '{}': {}", self.name, err);
+        // Wait for our response with a timeout
+        let timeout = tokio::time::Duration::from_secs(30);
+        let result = tokio::time::timeout(timeout, async {
+            loop {
+                let resp = self.recv_msg().await?;
+                if resp.get("id").and_then(|v| v.as_u64()) == Some(id) {
+                    if let Some(err) = resp.get("error") {
+                        anyhow::bail!("MCP error from '{}': {}", self.name, err);
+                    }
+                    return Ok(resp["result"].clone());
                 }
-                return Ok(resp["result"].clone());
+                // Drop unmatched messages (notifications, other ids)
             }
-            // Drop unmatched messages (notifications, other ids)
-        }
+        })
+        .await
+        .context(format!("MCP request to '{}' timed out after 30s", self.name))??;
+        Ok(result)
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
