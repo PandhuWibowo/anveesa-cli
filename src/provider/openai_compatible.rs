@@ -485,24 +485,24 @@ fn parse_tool_round_limit(value: Option<&str>) -> usize {
 
 fn tool_limit_message(max_tool_rounds: usize) -> Value {
     json!({
-        "role": "system",
+        "role": "user",
         "content": format!(
-            "Anveesa has already run {max_tool_rounds} tool rounds for this answer. Do not call tools again. Use the tool results already provided to produce the best final answer. If the requested work is not complete, say exactly what remains."
+            "[system: Anveesa has already run {max_tool_rounds} tool rounds for this answer. Do not call tools again. Use the tool results already provided to produce the best final answer. If the requested work is not complete, say exactly what remains.]"
         )
     })
 }
 
 fn length_continuation_message() -> Value {
     json!({
-        "role": "system",
-        "content": "Your previous response was cut off because it reached the output token limit. Continue from exactly where you left off. Do not repeat text you already produced and do not restart the answer. If you were in the middle of a tool call, re-issue that complete tool call now."
+        "role": "user",
+        "content": "[system: Your previous response was cut off because it reached the output token limit. Continue from exactly where you left off. Do not repeat text you already produced and do not restart the answer. If you were in the middle of a tool call, re-issue that complete tool call now.]"
     })
 }
 
 fn tool_intent_reprompt_message() -> Value {
     json!({
-        "role": "system",
-        "content": "Your previous message said you would inspect/read/check the workspace, but it did not call any tool or provide a final answer. Do not narrate future tool use. If you need information, call the relevant Anveesa tools now. Otherwise, answer the user directly."
+        "role": "user",
+        "content": "[system: Your previous message said you would inspect/read/check the workspace, but it did not call any tool or provide a final answer. Do not narrate future tool use. If you need information, call the relevant Anveesa tools now. Otherwise, answer the user directly.]"
     })
 }
 
@@ -1136,7 +1136,7 @@ mod tests {
     #[test]
     fn length_continuation_message_asks_to_resume_without_repeating() {
         let message = length_continuation_message();
-        assert_eq!(message["role"], json!("system"));
+        assert_eq!(message["role"], json!("user"));
         let content = message["content"].as_str().unwrap();
         assert!(content.contains("cut off"));
         assert!(content.contains("Do not repeat"));
@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     fn tool_limit_message_forces_final_answer() {
         let message = tool_limit_message(3);
-        assert_eq!(message["role"], json!("system"));
+        assert_eq!(message["role"], json!("user"));
         assert!(
             message["content"]
                 .as_str()
