@@ -3,6 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -303,6 +304,7 @@ async fn list_dir(arguments: &str) -> Result<Value> {
     }
 
     let mut entries = Vec::new();
+    let mut truncated = false;
     for entry in
         fs::read_dir(&path).with_context(|| format!("failed to read {}", path.display()))?
     {
@@ -319,6 +321,7 @@ async fn list_dir(arguments: &str) -> Result<Value> {
             "kind": path_kind(&entry_path),
         }));
         if entries.len() >= MAX_DIR_ENTRIES {
+            truncated = true;
             break;
         }
     }
@@ -326,7 +329,8 @@ async fn list_dir(arguments: &str) -> Result<Value> {
     Ok(json!({
         "ok": true,
         "path": path.display().to_string(),
-        "entries": entries
+        "entries": entries,
+        "truncated": truncated,
     }))
 }
 
@@ -339,6 +343,7 @@ async fn find_files(arguments: &str) -> Result<Value> {
     }
 
     let mut results = Vec::new();
+    let mut truncated = false;
     walk_paths(&root, |path| {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             return Ok(true);
@@ -348,15 +353,20 @@ async fn find_files(arguments: &str) -> Result<Value> {
                 "path": path.display().to_string(),
                 "kind": path_kind(path),
             }));
+            if results.len() >= MAX_SEARCH_RESULTS {
+                truncated = true;
+                return Ok(false);
+            }
         }
-        Ok(results.len() < MAX_SEARCH_RESULTS)
+        Ok(true)
     })?;
 
     Ok(json!({
         "ok": true,
         "root": root.display().to_string(),
         "query": args.query,
-        "results": results
+        "results": results,
+        "truncated": truncated,
     }))
 }
 
@@ -369,6 +379,7 @@ async fn search_text(arguments: &str) -> Result<Value> {
     }
 
     let mut results = Vec::new();
+    let mut truncated = false;
     walk_paths(&root, |path| {
         if !path.is_file() || is_sensitive_path(path) || !is_small_text_candidate(path) {
             return Ok(true);
@@ -377,29 +388,29 @@ async fn search_text(arguments: &str) -> Result<Value> {
         let Ok(content) = fs::read_to_string(path) else {
             return Ok(true);
         };
-        let lower = content.to_lowercase();
-        if let Some(byte_index) = lower.find(&query) {
-            let line_number = content[..byte_index].lines().count() + 1;
-            let line = content
-                .lines()
-                .nth(line_number.saturating_sub(1))
-                .unwrap_or_default()
-                .trim();
-            results.push(json!({
-                "path": path.display().to_string(),
-                "line": line_number,
-                "preview": truncate(line, 240),
-            }));
+        for (i, line) in content.lines().enumerate() {
+            if line.to_lowercase().contains(&query) {
+                results.push(json!({
+                    "path": path.display().to_string(),
+                    "line": i + 1,
+                    "preview": truncate(line.trim(), 240),
+                }));
+                if results.len() >= MAX_SEARCH_RESULTS {
+                    truncated = true;
+                    return Ok(false);
+                }
+            }
         }
 
-        Ok(results.len() < MAX_SEARCH_RESULTS)
+        Ok(true)
     })?;
 
     Ok(json!({
         "ok": true,
         "root": root.display().to_string(),
         "query": args.query,
-        "results": results
+        "results": results,
+        "truncated": truncated,
     }))
 }
 
@@ -441,6 +452,17 @@ async fn read_file(arguments: &str) -> Result<Value> {
     }))
 }
 
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent(concat!("anveesa-cli/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("failed to build HTTP client")
+    })
+}
+
 async fn web_search(arguments: &str) -> Result<Value> {
     let args: WebSearchArgs = parse_args(arguments)?;
     let query = args.query.trim();
@@ -452,9 +474,8 @@ async fn web_search(arguments: &str) -> Result<Value> {
         "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
         percent_encode(query)
     );
-    let response: Value = reqwest::Client::new()
+    let response: Value = http_client()
         .get(&url)
-        .header("User-Agent", "anveesa-cli/0.1")
         .send()
         .await
         .context("web search request failed")?
@@ -592,6 +613,7 @@ async fn run_command(arguments: &str) -> Result<Value> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .context("failed to spawn command")?;
 
@@ -772,16 +794,34 @@ fn is_small_text_candidate(path: &Path) -> bool {
 
 fn is_sensitive_path(path: &Path) -> bool {
     let lower = path.display().to_string().to_lowercase();
+    // Credential directories
     lower.contains("/.ssh/")
         || lower.contains("/.aws/")
         || lower.contains("/.gnupg/")
+        || lower.contains("/.kube/")
+        || lower.contains("/.docker/")
+        // Environment and secret files
         || lower.ends_with("/.env")
         || lower.contains("/.env.")
+        // SSH private key filenames
         || lower.ends_with("/id_rsa")
         || lower.ends_with("/id_dsa")
         || lower.ends_with("/id_ed25519")
+        || lower.ends_with("/id_ecdsa")
+        // Cloud/tool credential files
         || lower.ends_with("/credentials")
-        || lower.contains("secret")
+        || lower.ends_with("/.netrc")
+        || lower.ends_with("/.npmrc")
+        || lower.ends_with("/.pypirc")
+        || lower.ends_with("/.git-credentials")
+        // System auth files
+        || lower.ends_with("/etc/shadow")
+        || lower.ends_with("/etc/passwd")
+        // Targeted secret patterns (narrower than a broad "secret" substring)
+        || lower.contains("secret_key")
+        || lower.contains("secretkey")
+        || lower.contains("/secrets.")
+        || lower.contains("/secrets/")
         || lower.contains("private_key")
 }
 
@@ -912,10 +952,23 @@ mod tests {
 
     #[test]
     fn flags_sensitive_paths() {
+        // Original cases
         assert!(is_sensitive_path(Path::new("/home/u/.ssh/id_rsa")));
         assert!(is_sensitive_path(Path::new("/proj/.env")));
-        assert!(is_sensitive_path(Path::new("/proj/secret.txt")));
+        // New credential directories
+        assert!(is_sensitive_path(Path::new("/home/u/.kube/config")));
+        assert!(is_sensitive_path(Path::new("/home/u/.docker/config.json")));
+        assert!(is_sensitive_path(Path::new("/home/u/.git-credentials")));
+        assert!(is_sensitive_path(Path::new("/home/u/.netrc")));
+        assert!(is_sensitive_path(Path::new("/home/u/.npmrc")));
+        // Targeted secret patterns
+        assert!(is_sensitive_path(Path::new("/proj/config/secrets.yaml")));
+        assert!(is_sensitive_path(Path::new("/proj/secrets/db.json")));
+        assert!(is_sensitive_path(Path::new("/proj/config/secret_key.txt")));
+        // Non-sensitive paths — including the false-positive the old "secret" check caused
         assert!(!is_sensitive_path(Path::new("/proj/src/main.rs")));
+        assert!(!is_sensitive_path(Path::new("/proj/src/secret_manager.rs")));
+        assert!(!is_sensitive_path(Path::new("/proj/docs/secret_rotation.md")));
     }
 
     #[test]
@@ -1033,3 +1086,7 @@ mod tests {
         assert_eq!(result["exit_code"], json!(3));
     }
 }
+
+#[cfg(test)]
+#[path = "tools_scenarios.rs"]
+mod scenarios;

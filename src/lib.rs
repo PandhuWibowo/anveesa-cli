@@ -42,6 +42,8 @@ struct InteractiveSession {
     model: Option<String>,
     system: Option<String>,
     messages: Vec<ChatMessage>,
+    #[serde(default)]
+    saved_at: u64,
 }
 
 pub async fn run_anveesa() -> Result<()> {
@@ -77,7 +79,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         .providers
         .get(&provider_name)
         .with_context(|| format!("unknown provider '{provider_name}'"))?;
-    let tools_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
+    let _tools_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
     let mut images_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
     let model = options
         .model
@@ -101,20 +103,26 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
 
     let mut accumulated_usage = Usage::default();
 
-    let session_path = repl_session_path();
-    let mut history = session_path
+    let session_path = repl_session_path(&cwd);
+    let loaded_session = session_path
         .as_deref()
-        .and_then(|path| load_interactive_session(path, &cwd, &provider_name, &session_options))
-        .unwrap_or_default();
+        .and_then(|path| load_interactive_session(path, &cwd))
+        .or_else(|| {
+            // Migrate from the legacy single session.json if it matches our cwd.
+            let legacy = legacy_session_path()?;
+            let session = load_interactive_session(&legacy, &cwd)?;
+            let _ = fs::remove_file(&legacy);
+            Some(session)
+        });
+    let mut history = loaded_session.as_ref().map(|s| s.messages.clone()).unwrap_or_default();
+    let session_saved_at = loaded_session.as_ref().filter(|s| s.saved_at > 0).map(|s| s.saved_at);
     let history_path = repl_history_path();
     print_session_header(
         &provider_name,
         session_options.model.as_deref().unwrap_or("-"),
         history.len() / 2,
-        workspace_context.is_some(),
-        tools_available,
-        policy,
         !history.is_empty(),
+        session_saved_at,
     );
 
     let is_tty = io::stdout().is_terminal();
@@ -164,6 +172,15 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             }
             "/help" => {
                 print_help_inline(is_tty);
+                continue;
+            }
+            "/session" => {
+                print_session_info(
+                    is_tty,
+                    session_path.as_deref(),
+                    history.len() / 2,
+                    session_saved_at,
+                );
                 continue;
             }
             "/status" => {
@@ -284,19 +301,22 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             eprintln!("\x1b[2m  Screenshot from clipboard attached.\x1b[0m");
         }
 
-        match ask_streaming(
-            &config,
-            &session_options,
-            prompt.clone(),
-            &history,
-            workspace_context.as_deref(),
-            policy,
-            image,
-            RenderMode::Interactive,
-        )
-        .await
-        {
-            Ok(result) => {
+        let ask_result = tokio::select! {
+            r = ask_streaming(
+                &config,
+                &session_options,
+                prompt.clone(),
+                &history,
+                workspace_context.as_deref(),
+                policy,
+                image,
+                RenderMode::Interactive,
+            ) => Some(r),
+            _ = tokio::signal::ctrl_c() => None,
+        };
+
+        match ask_result {
+            Some(Ok(result)) => {
                 println!();
                 if let Some(u) = result.usage {
                     accumulated_usage.prompt_tokens += u.prompt_tokens;
@@ -317,7 +337,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                     );
                 }
             }
-            Err(error) => {
+            Some(Err(error)) => {
                 if is_tty {
                     eprintln!("\x1b[1;31m✗\x1b[0m {error:#}");
                 } else {
@@ -337,6 +357,25 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                         &history,
                     );
                 }
+            }
+            None => {
+                // Ctrl+C during streaming — save current history and exit cleanly.
+                println!();
+                if is_tty {
+                    eprintln!("\x1b[2m  ^C  Session saved.\x1b[0m");
+                } else {
+                    eprintln!("interrupted");
+                }
+                if let Some(path) = &session_path {
+                    let _ = save_interactive_session(
+                        path,
+                        &cwd,
+                        &provider_name,
+                        &session_options,
+                        &history,
+                    );
+                }
+                break;
             }
         }
     }
@@ -957,7 +996,7 @@ fn print_status_inline(
 
 fn print_help_inline(is_tty: bool) {
     if !is_tty {
-        println!("commands: /clear, /attach [path], /exit, /quit, /help");
+        println!("commands: /clear, /session, /attach [path], /exit, /quit, /help");
         println!("images: copy an image (Cmd+C), then send a message to auto-attach it");
         return;
     }
@@ -965,9 +1004,10 @@ fn print_help_inline(is_tty: bool) {
     println!("\x1b[2m  Commands\x1b[0m");
     println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
     println!("  \x1b[1;32m/status\x1b[0m             provider, model, turns, token usage");
+    println!("  \x1b[1;32m/session\x1b[0m            show session file, age, and turn count");
     println!("  \x1b[1;32m/model\x1b[0m \x1b[2m[name]\x1b[0m      switch or show current model");
     println!("  \x1b[1;32m/provider\x1b[0m \x1b[2m[name]\x1b[0m   switch or show current provider");
-    println!("  \x1b[1;32m/clear\x1b[0m              reset conversation");
+    println!("  \x1b[1;32m/clear\x1b[0m              reset conversation and delete saved session");
     println!("  \x1b[1;32m/attach\x1b[0m \x1b[2m[path]\x1b[0m     attach image from file or clipboard");
     println!("  \x1b[1;32m/exit\x1b[0m, \x1b[1;32m/quit\x1b[0m       leave the session");
     println!("  \x1b[1;32m/help\x1b[0m               show this message");
@@ -977,6 +1017,42 @@ fn print_help_inline(is_tty: bool) {
     println!("  Cmd+C an image, then send a message — it attaches automatically.");
     println!("  Or use \x1b[1;32m/attach\x1b[0m \x1b[2mpath/to/file.png\x1b[0m for a specific file.");
     println!("  For broadest clipboard support: \x1b[2mbrew install pngpaste\x1b[0m");
+    println!();
+}
+
+fn print_session_info(is_tty: bool, path: Option<&Path>, turns: usize, saved_at: Option<u64>) {
+    let Some(path) = path else {
+        if is_tty {
+            eprintln!("\x1b[2m  no session path available\x1b[0m");
+        } else {
+            println!("no session path available");
+        }
+        return;
+    };
+
+    let short_path = std::env::var("HOME")
+        .map(|h| path.display().to_string().replacen(&h, "~", 1))
+        .unwrap_or_else(|_| path.display().to_string());
+
+    if !is_tty {
+        println!("session: {short_path}");
+        println!("turns: {turns}");
+        if let Some(ts) = saved_at {
+            println!("saved: {}", format_session_age(Some(ts)));
+        }
+        return;
+    }
+
+    println!();
+    println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
+    println!("  \x1b[2mfile  \x1b[0m  \x1b[2m{short_path}\x1b[0m");
+    println!("  \x1b[2mturns \x1b[0m  {turns}");
+    if let Some(ts) = saved_at {
+        println!("  \x1b[2msaved \x1b[0m  {}", format_session_age(Some(ts)));
+    } else {
+        println!("  \x1b[2msaved \x1b[0m  not yet");
+    }
+    println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
     println!();
 }
 
@@ -1073,17 +1149,19 @@ fn build_prompt(prompt_parts: Vec<String>, force_stdin: bool) -> Result<String> 
 fn print_session_header(
     provider: &str,
     model: &str,
-    _turns: usize,
-    _has_workspace_context: bool,
-    _tools_available: bool,
-    _policy: ApprovalPolicy,
+    turns: usize,
     resumed: bool,
+    saved_at: Option<u64>,
 ) {
     let is_tty = io::stdout().is_terminal();
     let version = env!("CARGO_PKG_VERSION");
 
     if !is_tty {
-        let tag = if resumed { " (resumed)" } else { "" };
+        let tag = if resumed {
+            format!(" (resumed · {turns} turns · {})", format_session_age(saved_at))
+        } else {
+            String::new()
+        };
         println!("anveesa v{version}{tag} | {provider} · {model}");
         return;
     }
@@ -1110,8 +1188,11 @@ fn print_session_header(
         r
     }
 
-    // ── anveesa v0.2.8 [· Welcome back!] ─────────────────
-    let greeting = if resumed { " · Welcome back!" } else { "" };
+    let greeting = if resumed {
+        format!(" · Resumed ({turns} turns · {})", format_session_age(saved_at))
+    } else {
+        String::new()
+    };
     let title = format!(" anveesa v{version}{greeting} ");
     let title_len = title.chars().count();
     let right_dashes = width.saturating_sub(2 + title_len);
@@ -1120,11 +1201,9 @@ fn print_session_header(
         "─".repeat(right_dashes)
     );
 
-    //   provider · model · ~/cwd
     let info = trunc_to(&format!("  {provider} · {model} · {cwd}"), width);
     println!("\x1b[2m{info}\x1b[0m");
 
-    //   /help for commands
     println!("\x1b[2m  /help for commands\x1b[0m");
     println!();
 }
@@ -1755,6 +1834,40 @@ fn repl_history_path() -> Option<PathBuf> {
     Some(dir.join("history"))
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn format_session_age(saved_at: Option<u64>) -> String {
+    let Some(ts) = saved_at else {
+        return "unknown age".to_string();
+    };
+    let secs = unix_now().saturating_sub(ts);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+/// FNV-1a 64-bit hash of the cwd path — used as a stable per-directory session filename.
+fn cwd_session_hash(cwd: &Path) -> String {
+    let s = cwd.to_string_lossy();
+    let mut h: u64 = 14695981039346656037;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    format!("{h:016x}")
+}
+
 fn append_repl_history(path: &Path, prompt: &str) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -1767,25 +1880,33 @@ fn append_repl_history(path: &Path, prompt: &str) -> io::Result<()> {
     writeln!(file, "{prompt}")
 }
 
-fn repl_session_path() -> Option<PathBuf> {
-    let path = config_path().ok()?;
-    let dir = path.parent()?;
-    let _ = fs::create_dir_all(dir);
-    Some(dir.join("session.json"))
+/// Per-directory session file: ~/.config/anveesa/sessions/{cwd-hash}.json
+fn repl_session_path(cwd: &Path) -> Option<PathBuf> {
+    let config_dir = config_path().ok()?.parent()?.to_path_buf();
+    let sessions_dir = config_dir.join("sessions");
+    let _ = fs::create_dir_all(&sessions_dir);
+    Some(sessions_dir.join(format!("{}.json", cwd_session_hash(cwd))))
 }
 
-fn load_interactive_session(
-    path: &Path,
-    cwd: &Path,
-    provider: &str,
-    options: &AskOptions,
-) -> Option<Vec<ChatMessage>> {
+/// Legacy path for backward-compat migration.
+fn legacy_session_path() -> Option<PathBuf> {
+    let config_dir = config_path().ok()?.parent()?.to_path_buf();
+    let path = config_dir.join("session.json");
+    if path.exists() { Some(path) } else { None }
+}
+
+fn load_interactive_session(path: &Path, cwd: &Path) -> Option<InteractiveSession> {
     let content = fs::read_to_string(path).ok()?;
     let session: InteractiveSession = serde_json::from_str(&content).ok()?;
-    if !session_matches(&session, cwd, provider, options) {
+    if session.cwd != cwd.display().to_string() {
         return None;
     }
-    Some(session.messages)
+    // Auto-expire sessions older than 30 days.
+    if session.saved_at > 0 && unix_now().saturating_sub(session.saved_at) > 30 * 24 * 3600 {
+        let _ = fs::remove_file(path);
+        return None;
+    }
+    Some(session)
 }
 
 fn save_interactive_session(
@@ -1801,22 +1922,11 @@ fn save_interactive_session(
         model: options.model.clone(),
         system: options.system.clone(),
         messages: history.to_vec(),
+        saved_at: unix_now(),
     };
     let content = serde_json::to_string_pretty(&session)
         .context("failed to serialize interactive session")?;
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn session_matches(
-    session: &InteractiveSession,
-    cwd: &Path,
-    provider: &str,
-    options: &AskOptions,
-) -> bool {
-    session.cwd == cwd.display().to_string()
-        && session.provider == provider
-        && session.model == options.model
-        && session.system == options.system
 }
 
 fn workspace_context() -> Result<String> {
@@ -1987,14 +2097,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_session_matches_same_scope_only() {
-        let options = AskOptions {
-            provider: Some("provider-a".into()),
-            model: Some("model-a".into()),
-            system: None,
-            stdin: false,
-            yes: false,
-        };
+    fn interactive_session_matches_cwd_only() {
         let cwd = Path::new("/tmp/anveesa-session");
         let session = InteractiveSession {
             cwd: cwd.display().to_string(),
@@ -2002,16 +2105,14 @@ mod tests {
             model: Some("model-a".into()),
             system: None,
             messages: vec![],
+            saved_at: 0,
         };
 
-        assert!(session_matches(&session, cwd, "provider-a", &options));
-        assert!(!session_matches(
-            &session,
-            Path::new("/tmp/other"),
-            "provider-a",
-            &options
-        ));
-        assert!(!session_matches(&session, cwd, "provider-b", &options));
+        // Matches when cwd is the same.
+        assert_eq!(session.cwd, cwd.display().to_string());
+        // A different cwd should not match.
+        assert_ne!(session.cwd, Path::new("/tmp/other").display().to_string());
+        // Provider/model differences no longer prevent a session from loading.
     }
 
     #[test]
@@ -2034,10 +2135,10 @@ mod tests {
 
         save_interactive_session(&path, &dir, "provider-a", &options, &history).unwrap();
 
-        assert_eq!(
-            load_interactive_session(&path, &dir, "provider-a", &options),
-            Some(history)
-        );
+        let loaded = load_interactive_session(&path, &dir).unwrap();
+        assert_eq!(loaded.messages, history);
+        // saved_at should be set.
+        assert!(loaded.saved_at > 0);
 
         let _ = fs::remove_dir_all(&dir);
     }
