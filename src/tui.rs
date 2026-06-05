@@ -44,10 +44,15 @@ pub enum TuiEvent {
 enum Msg {
     User { text: String },
     Assistant { text: String },
-    Tool { icon: &'static str, text: String, ok: bool },
+    Tool { done: bool, ok: bool, text: String },
     FileOp { verb: String, path: String, added: usize, removed: usize },
     Error(String),
     System(String),
+}
+
+#[derive(Debug)]
+struct PendingTool {
+    summary: String,
 }
 
 #[derive(Debug)]
@@ -69,7 +74,8 @@ pub struct App {
     // conversation display
     messages: Vec<Msg>,
     streaming_buf: String,
-    accumulated_response: String, // full assistant text across tool calls
+    accumulated_response: String,
+    pending_tool: Option<PendingTool>, // currently-running tool (not yet committed)
     tool_status: String,
     plan_tasks: Vec<String>,
     plan_done: Vec<bool>,
@@ -151,6 +157,7 @@ impl App {
             messages,
             streaming_buf: String::new(),
             accumulated_response: String::new(),
+            pending_tool: None,
             tool_status: String::new(),
             plan_tasks: vec![],
             plan_done: vec![],
@@ -636,22 +643,25 @@ async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
         }
         TuiEvent::ToolCall(summary) => {
             flush_streaming_buf(app);
-            app.messages.push(Msg::Tool { icon: "⚙", text: summary, ok: true });
-            app.tool_status = "Running".to_string();
+            // Commit any previous pending tool (shouldn't happen, but be safe)
+            commit_pending_tool(app, true);
+            app.pending_tool = Some(PendingTool { summary: summary.clone() });
+            app.tool_status = summary;
         }
         TuiEvent::ToolDone { summary, ok } => {
-            if let Some(Msg::Tool { text, ok: tool_ok, .. }) = app.messages.last_mut() {
-                *text = summary;
-                *tool_ok = ok;
-            }
+            // Commit the pending tool with its final status
+            app.pending_tool = Some(PendingTool { summary });
+            commit_pending_tool(app, ok);
             app.tool_status = "Thinking".to_string();
         }
         TuiEvent::FileOp { verb, path, added, removed } => {
             flush_streaming_buf(app);
+            commit_pending_tool(app, true);
             app.messages.push(Msg::FileOp { verb, path, added, removed });
         }
         TuiEvent::Confirm { summary, reply } => {
             flush_streaming_buf(app);
+            commit_pending_tool(app, true);
             app.confirm = Some(PendingConfirm { summary, reply });
             app.mode = Mode::Confirming;
         }
@@ -688,8 +698,16 @@ fn flush_streaming_buf(app: &mut App) {
     }
 }
 
+/// Commit a pending tool call to the message history with its final status.
+fn commit_pending_tool(app: &mut App, ok: bool) {
+    if let Some(tool) = app.pending_tool.take() {
+        app.messages.push(Msg::Tool { done: true, ok, text: tool.summary });
+    }
+}
+
 /// Commit the completed turn to history and save session.
 fn finish_turn(app: &mut App) {
+    commit_pending_tool(app, true);
     flush_streaming_buf(app);
     let response = std::mem::take(&mut app.accumulated_response);
     if !response.is_empty() {
@@ -767,8 +785,14 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
                 lines.push(Line::from(""));
             }
-            Msg::Tool { icon, text, ok } => {
-                let color = if *ok { Color::Rgb(229, 192, 123) } else { Color::Rgb(224, 108, 117) };
+            Msg::Tool { done, ok, text } => {
+                let (icon, color) = if !done {
+                    ("⠋", Color::DarkGray)
+                } else if *ok {
+                    ("✓", Color::Rgb(152, 195, 121))
+                } else {
+                    ("✗", Color::Rgb(224, 108, 117))
+                };
                 lines.push(Line::from(Span::styled(
                     format!("  {icon} {text}"),
                     Style::default().fg(color),
@@ -804,8 +828,19 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    // Live pending tool (running, not yet committed)
+    if let Some(tool) = &app.pending_tool {
+        let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let dot = dots[app.spinner_frame % dots.len()];
+        lines.push(Line::from(Span::styled(
+            format!("  {dot} {}", tool.summary),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+    }
+
     // In-progress streaming
-    if !app.streaming_buf.is_empty() || app.mode == Mode::Streaming {
+    if !app.streaming_buf.is_empty() || (app.mode == Mode::Streaming && app.pending_tool.is_none()) {
         lines.push(assistant_header(&app.model));
         if !app.streaming_buf.is_empty() {
             for l in format_assistant_lines(&app.streaming_buf, width) {
