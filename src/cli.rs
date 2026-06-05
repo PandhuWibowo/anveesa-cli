@@ -25,6 +25,26 @@ pub enum Command {
     Providers,
     /// Manage the Anveesa config file.
     Config(ConfigArgs),
+    /// Manage saved interactive sessions.
+    Sessions(SessionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SessionsArgs {
+    #[command(subcommand)]
+    pub command: SessionsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionsCommand {
+    /// List all saved sessions.
+    List,
+    /// Delete sessions. Without flags, deletes the session for the current directory.
+    Clear {
+        /// Delete all saved sessions.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Args)]

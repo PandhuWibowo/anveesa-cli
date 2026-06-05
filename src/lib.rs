@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::{
-    cli::{AskOptions, Cli, Command, ConfigCommand},
+    cli::{AskOptions, Cli, Command, ConfigCommand, SessionsCommand},
     config::{
         AppConfig, ProviderConfig, config_path, init_config, print_path, set_default_model,
         set_default_provider,
@@ -55,6 +55,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Some(Command::Ask(args)) => run_ask(args.options, args.prompt).await,
         Some(Command::Providers) => list_providers(),
         Some(Command::Config(args)) => run_config(args.command),
+        Some(Command::Sessions(args)) => run_sessions(args.command),
         None if cli.prompt.is_empty() && cli.ask_options.stdin => {
             run_ask(cli.ask_options, cli.prompt).await
         }
@@ -103,6 +104,8 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
 
     let mut accumulated_usage = Usage::default();
 
+    purge_stale_sessions();
+
     let session_path = repl_session_path(&cwd);
     let loaded_session = session_path
         .as_deref()
@@ -115,7 +118,11 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             Some(session)
         });
     let mut history = loaded_session.as_ref().map(|s| s.messages.clone()).unwrap_or_default();
+    // saved_at at load time — used only for the startup header so it shows when the previous
+    // run ended, not the current run's save time.
     let session_saved_at = loaded_session.as_ref().filter(|s| s.saved_at > 0).map(|s| s.saved_at);
+    // tracks the most recent successful save this run — kept fresh for /session display
+    let mut last_saved_at: u64 = session_saved_at.unwrap_or(0);
     let history_path = repl_history_path();
     print_session_header(
         &provider_name,
@@ -179,7 +186,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                     is_tty,
                     session_path.as_deref(),
                     history.len() / 2,
-                    session_saved_at,
+                    Some(last_saved_at).filter(|&t| t > 0),
                 );
                 continue;
             }
@@ -328,13 +335,9 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 history.push(ChatMessage::user(prompt));
                 history.push(ChatMessage::assistant(result.text));
                 if let Some(path) = &session_path {
-                    let _ = save_interactive_session(
-                        path,
-                        &cwd,
-                        &provider_name,
-                        &session_options,
-                        &history,
-                    );
+                    if save_interactive_session(path, &cwd, &provider_name, &session_options, &history).is_ok() {
+                        last_saved_at = unix_now();
+                    }
                 }
             }
             Some(Err(error)) => {
@@ -349,13 +352,9 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                     "The previous turn failed inside Anveesa before a final answer was produced: {error:#}"
                 )));
                 if let Some(path) = &session_path {
-                    let _ = save_interactive_session(
-                        path,
-                        &cwd,
-                        &provider_name,
-                        &session_options,
-                        &history,
-                    );
+                    if save_interactive_session(path, &cwd, &provider_name, &session_options, &history).is_ok() {
+                        last_saved_at = unix_now();
+                    }
                 }
             }
             None => {
@@ -367,13 +366,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                     eprintln!("interrupted");
                 }
                 if let Some(path) = &session_path {
-                    let _ = save_interactive_session(
-                        path,
-                        &cwd,
-                        &provider_name,
-                        &session_options,
-                        &history,
-                    );
+                    let _ = save_interactive_session(path, &cwd, &provider_name, &session_options, &history);
                 }
                 break;
             }
@@ -382,6 +375,117 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
 
     if let Some(path) = &session_path {
         let _ = save_interactive_session(path, &cwd, &provider_name, &session_options, &history);
+    }
+    Ok(())
+}
+
+fn run_sessions(command: SessionsCommand) -> Result<()> {
+    match command {
+        SessionsCommand::List => list_sessions(),
+        SessionsCommand::Clear { all } => clear_sessions(all),
+    }
+}
+
+fn sessions_dir() -> Option<PathBuf> {
+    let config_dir = config_path().ok()?.parent()?.to_path_buf();
+    Some(config_dir.join("sessions"))
+}
+
+fn list_sessions() -> Result<()> {
+    let Some(dir) = sessions_dir() else {
+        println!("No sessions directory found.");
+        return Ok(());
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        println!("No sessions found.");
+        return Ok(());
+    };
+
+    let mut sessions: Vec<(String, usize, u64)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(session) = serde_json::from_str::<InteractiveSession>(&content) {
+                sessions.push((session.cwd, session.messages.len() / 2, session.saved_at));
+            }
+        }
+    }
+    sessions.sort_by(|a, b| b.2.cmp(&a.2));
+
+    let is_tty = io::stdout().is_terminal();
+    if sessions.is_empty() {
+        if is_tty {
+            eprintln!("\x1b[2m  No saved sessions.\x1b[0m");
+        } else {
+            println!("no sessions");
+        }
+        return Ok(());
+    }
+
+    if !is_tty {
+        for (cwd, turns, saved_at) in &sessions {
+            println!("{cwd}\t{turns}\t{saved_at}");
+        }
+        return Ok(());
+    }
+
+    println!();
+    println!("\x1b[90m  ──────────────────────────────────────────────────────\x1b[0m");
+    for (cwd, turns, saved_at) in &sessions {
+        let age = format_session_age(Some(*saved_at));
+        let turn_str = if *turns == 1 { "1 turn ".to_string() } else { format!("{turns} turns") };
+        let short_cwd = std::env::var("HOME")
+            .map(|h| cwd.replacen(&h, "~", 1))
+            .unwrap_or_else(|_| cwd.clone());
+        println!("  \x1b[2m{age:>10}\x1b[0m  {turn_str:>7}  {short_cwd}");
+    }
+    println!("\x1b[90m  ──────────────────────────────────────────────────────\x1b[0m");
+    println!();
+    Ok(())
+}
+
+fn clear_sessions(all: bool) -> Result<()> {
+    let is_tty = io::stdout().is_terminal();
+    if all {
+        let mut count = 0usize;
+        if let Some(dir) = sessions_dir() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                        if fs::remove_file(&path).is_ok() {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if is_tty {
+            eprintln!("\x1b[2m  {count} session(s) deleted.\x1b[0m");
+        } else {
+            println!("{count} sessions deleted");
+        }
+    } else {
+        let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+        let path = repl_session_path(&cwd).context("could not determine session path")?;
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to delete {}", path.display()))?;
+            if is_tty {
+                eprintln!("\x1b[2m  Session for {} cleared.\x1b[0m", cwd.display());
+            } else {
+                println!("session cleared");
+            }
+        } else {
+            if is_tty {
+                eprintln!("\x1b[2m  No session for {}.\x1b[0m", cwd.display());
+            } else {
+                println!("no session");
+            }
+        }
     }
     Ok(())
 }
@@ -1880,6 +1984,28 @@ fn append_repl_history(path: &Path, prompt: &str) -> io::Result<()> {
     writeln!(file, "{prompt}")
 }
 
+/// Delete all session files whose saved_at is older than 30 days.  Called once at
+/// startup so orphaned sessions (from deleted/moved projects) eventually disappear.
+fn purge_stale_sessions() {
+    let Some(dir) = sessions_dir() else { return };
+    let Ok(entries) = fs::read_dir(&dir) else { return };
+    let cutoff = unix_now().saturating_sub(30 * 24 * 3600);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let stale = fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str::<InteractiveSession>(&c).ok())
+            .map(|s| s.saved_at > 0 && s.saved_at < cutoff)
+            .unwrap_or(true); // unparseable → delete
+        if stale {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 /// Per-directory session file: ~/.config/anveesa/sessions/{cwd-hash}.json
 fn repl_session_path(cwd: &Path) -> Option<PathBuf> {
     let config_dir = config_path().ok()?.parent()?.to_path_buf();
@@ -2141,5 +2267,212 @@ mod tests {
         assert!(loaded.saved_at > 0);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── cwd_session_hash ──────────────────────────────────────────────────────
+
+    #[test]
+    fn cwd_hash_is_deterministic() {
+        let p = Path::new("/home/user/my-project");
+        assert_eq!(cwd_session_hash(p), cwd_session_hash(p));
+    }
+
+    #[test]
+    fn cwd_hash_differs_for_different_paths() {
+        let a = cwd_session_hash(Path::new("/home/user/project-a"));
+        let b = cwd_session_hash(Path::new("/home/user/project-b"));
+        let c = cwd_session_hash(Path::new("/home/user/project-a/sub"));
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn cwd_hash_is_16_hex_chars() {
+        let h = cwd_session_hash(Path::new("/any/path"));
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── format_session_age ────────────────────────────────────────────────────
+
+    #[test]
+    fn format_age_none_returns_unknown() {
+        assert_eq!(format_session_age(None), "unknown age");
+    }
+
+    #[test]
+    fn format_age_just_now() {
+        let ts = unix_now();
+        assert_eq!(format_session_age(Some(ts)), "just now");
+        assert_eq!(format_session_age(Some(ts - 59)), "just now");
+    }
+
+    #[test]
+    fn format_age_minutes() {
+        let ts = unix_now() - 60;
+        assert_eq!(format_session_age(Some(ts)), "1m ago");
+        let ts2 = unix_now() - 3599;
+        assert_eq!(format_session_age(Some(ts2)), "59m ago");
+    }
+
+    #[test]
+    fn format_age_hours() {
+        let ts = unix_now() - 3600;
+        assert_eq!(format_session_age(Some(ts)), "1h ago");
+        let ts2 = unix_now() - 86399;
+        assert_eq!(format_session_age(Some(ts2)), "23h ago");
+    }
+
+    #[test]
+    fn format_age_days() {
+        let ts = unix_now() - 86400;
+        assert_eq!(format_session_age(Some(ts)), "1d ago");
+        let ts2 = unix_now() - 7 * 86400;
+        assert_eq!(format_session_age(Some(ts2)), "7d ago");
+    }
+
+    // ── 30-day expiry ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn expired_session_is_deleted_on_load() {
+        let dir = std::env::temp_dir().join(format!("anveesa_expiry_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old_session.json");
+        let options = AskOptions { provider: Some("p".into()), model: None, system: None, stdin: false, yes: false };
+        save_interactive_session(&path, &dir, "p", &options, &[]).unwrap();
+
+        // Backdate saved_at by 31 days.
+        let content = fs::read_to_string(&path).unwrap();
+        let mut session: InteractiveSession = serde_json::from_str(&content).unwrap();
+        session.saved_at = unix_now() - 31 * 24 * 3600;
+        fs::write(&path, serde_json::to_string_pretty(&session).unwrap()).unwrap();
+
+        let result = load_interactive_session(&path, &dir);
+        assert!(result.is_none(), "expired session must not load");
+        assert!(!path.exists(), "expired session file must be deleted");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_expired_session_loads_normally() {
+        let dir = std::env::temp_dir().join(format!("anveesa_noexpiry_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.json");
+        let options = AskOptions { provider: Some("p".into()), model: None, system: None, stdin: false, yes: false };
+        let history = vec![ChatMessage::user("hi".into()), ChatMessage::assistant("hello".into())];
+        save_interactive_session(&path, &dir, "p", &options, &history).unwrap();
+
+        let loaded = load_interactive_session(&path, &dir).unwrap();
+        assert_eq!(loaded.messages, history);
+        assert!(path.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── legacy migration ──────────────────────────────────────────────────────
+
+    #[test]
+    fn mismatched_cwd_returns_none() {
+        let dir_a = std::env::temp_dir().join(format!("anveesa_cwd_a_{}", std::process::id()));
+        let dir_b = std::env::temp_dir().join(format!("anveesa_cwd_b_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+        fs::create_dir_all(&dir_a).unwrap();
+        let path = dir_a.join("session.json");
+        let options = AskOptions { provider: None, model: None, system: None, stdin: false, yes: false };
+        save_interactive_session(&path, &dir_a, "p", &options, &[]).unwrap();
+
+        // Loading with a different cwd must return None.
+        assert!(load_interactive_session(&path, &dir_b).is_none());
+        // Loading with the correct cwd must succeed.
+        assert!(load_interactive_session(&path, &dir_a).is_some());
+
+        let _ = fs::remove_dir_all(&dir_a);
+    }
+
+    // ── purge_stale_sessions ──────────────────────────────────────────────────
+
+    #[test]
+    fn purge_removes_old_files_but_keeps_recent_ones() {
+        let sessions_base = std::env::temp_dir()
+            .join(format!("anveesa_purge_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&sessions_base);
+        fs::create_dir_all(&sessions_base).unwrap();
+
+        let options = AskOptions { provider: None, model: None, system: None, stdin: false, yes: false };
+
+        // Create two fresh sessions and one stale session.
+        let fresh_dir_1 = sessions_base.join("project1");
+        let fresh_dir_2 = sessions_base.join("project2");
+        let stale_dir = sessions_base.join("old_project");
+        fs::create_dir_all(&fresh_dir_1).unwrap();
+        fs::create_dir_all(&fresh_dir_2).unwrap();
+        fs::create_dir_all(&stale_dir).unwrap();
+
+        let fresh1_path = sessions_base.join("fresh1.json");
+        let fresh2_path = sessions_base.join("fresh2.json");
+        let stale_path = sessions_base.join("stale.json");
+
+        save_interactive_session(&fresh1_path, &fresh_dir_1, "p", &options, &[]).unwrap();
+        save_interactive_session(&fresh2_path, &fresh_dir_2, "p", &options, &[]).unwrap();
+        save_interactive_session(&stale_path, &stale_dir, "p", &options, &[]).unwrap();
+
+        // Backdate the stale session.
+        let content = fs::read_to_string(&stale_path).unwrap();
+        let mut session: InteractiveSession = serde_json::from_str(&content).unwrap();
+        session.saved_at = unix_now() - 31 * 24 * 3600;
+        fs::write(&stale_path, serde_json::to_string_pretty(&session).unwrap()).unwrap();
+
+        // Manually run purge logic over our temp dir (can't call purge_stale_sessions
+        // directly since it targets the real config dir, so we replicate its logic).
+        let cutoff = unix_now().saturating_sub(30 * 24 * 3600);
+        for entry in fs::read_dir(&sessions_base).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            let stale = fs::read_to_string(&path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<InteractiveSession>(&c).ok())
+                .map(|s| s.saved_at > 0 && s.saved_at < cutoff)
+                .unwrap_or(true);
+            if stale { let _ = fs::remove_file(&path); }
+        }
+
+        assert!(fresh1_path.exists(), "fresh session 1 must not be purged");
+        assert!(fresh2_path.exists(), "fresh session 2 must not be purged");
+        assert!(!stale_path.exists(), "stale session must be purged");
+
+        let _ = fs::remove_dir_all(&sessions_base);
+    }
+
+    #[test]
+    fn purge_removes_unparseable_json_files() {
+        let sessions_base = std::env::temp_dir()
+            .join(format!("anveesa_purge_bad_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&sessions_base);
+        fs::create_dir_all(&sessions_base).unwrap();
+
+        let bad_path = sessions_base.join("corrupt.json");
+        fs::write(&bad_path, b"not valid json at all {{{").unwrap();
+
+        // Replicate purge logic.
+        let cutoff = unix_now().saturating_sub(30 * 24 * 3600);
+        for entry in fs::read_dir(&sessions_base).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            let stale = fs::read_to_string(&path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<InteractiveSession>(&c).ok())
+                .map(|s| s.saved_at > 0 && s.saved_at < cutoff)
+                .unwrap_or(true);
+            if stale { let _ = fs::remove_file(&path); }
+        }
+
+        assert!(!bad_path.exists(), "corrupt session file must be purged");
+
+        let _ = fs::remove_dir_all(&sessions_base);
     }
 }
