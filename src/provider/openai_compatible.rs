@@ -86,7 +86,11 @@ pub async fn ask(
             body["max_tokens"] = json!(max_tokens);
         }
         if tools_enabled {
-            body["tools"] = json!(tools::definitions(policy.allows_write_tools()));
+            let mut defs = tools::definitions(policy.allows_write_tools());
+            if let Some(m) = &request.mcp {
+                defs.extend(m.tool_definitions());
+            }
+            body["tools"] = json!(defs);
             body["tool_choice"] = json!("auto");
         }
 
@@ -168,7 +172,7 @@ pub async fn ask(
 
         messages.push(assistant_tool_message(&state));
         for call in &state.tool_calls {
-            let content = dispatch_tool(call, policy, &mut approval_state, events).await;
+            let content = dispatch_tool(call, policy, &mut approval_state, events, request.mcp.as_deref()).await;
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -209,7 +213,28 @@ async fn dispatch_tool(
     policy: ApprovalPolicy,
     approval_state: &mut ToolApprovalState,
     events: &UnboundedSender<StreamEvent>,
+    mcp: Option<&crate::mcp::McpManager>,
 ) -> String {
+    // Route MCP tools directly — no approval policy, no filesystem restrictions.
+    if tools::is_mcp_tool(&call.name) {
+        let summary = format!("mcp {}", &call.name[5..]); // strip "mcp__"
+        let _ = events.send(StreamEvent::ToolCall { summary: summary.clone() });
+        let result = if let Some(m) = mcp {
+            m.call(&call.name, &call.arguments).await
+                .unwrap_or_else(|| serde_json::json!({ "ok": false, "error": "server not found" }).to_string())
+        } else {
+            serde_json::json!({ "ok": false, "error": "MCP not configured" }).to_string()
+        };
+        let (ok, err) = parse_tool_result_status(&result);
+        let _ = events.send(StreamEvent::ToolResult {
+            summary,
+            ok,
+            elapsed_ms: 0,
+            error: err,
+        });
+        return result;
+    }
+
     let summary = tools::describe_call(&call.name, &call.arguments);
 
     // Plan tools — display only, no approval or filesystem access needed.
@@ -314,6 +339,10 @@ async fn dispatch_tool(
     }
 
     result
+}
+
+pub fn parse_tool_result_status_pub(result: &str) -> (bool, Option<String>) {
+    parse_tool_result_status(result)
 }
 
 fn parse_tool_result_status(result: &str) -> (bool, Option<String>) {

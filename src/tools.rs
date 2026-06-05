@@ -25,8 +25,9 @@ const MAX_COMMAND_TIMEOUT_SECS: u64 = 300;
 pub fn guidance(include_write: bool) -> String {
     let mut text = String::from(
         "You can use Anveesa tools to inspect the workspace: list directories, find files by name, \
-search text, read capped file snippets, and do a basic public web lookup. Prefer tools over guessing. \
-If you need to inspect, read, list, search, or check something, call the relevant tool immediately; \
+search text, read capped file snippets, fetch URLs, run git commands, and do a basic public web lookup. \
+Prefer tools over guessing. \
+If you need to inspect, read, list, search, fetch, or check something, call the relevant tool immediately; \
 do not end a response by saying you will inspect something later.",
     );
     if include_write {
@@ -56,6 +57,11 @@ pub fn is_write_tool(name: &str) -> bool {
     )
 }
 
+/// Whether a tool name belongs to an MCP server (prefix mcp__).
+pub fn is_mcp_tool(name: &str) -> bool {
+    name.starts_with("mcp__")
+}
+
 /// A short, human-readable summary of a tool call for confirmation prompts.
 pub fn describe_call(name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
@@ -74,6 +80,13 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
         ),
         "read_file" => format!("read file {}", field("path")),
         "web_search" => format!("web search `{}`", field("query")),
+        "fetch_url"  => format!("fetch {}", field("url")),
+        "git_status" => "git status".to_string(),
+        "git_diff"   => {
+            let path = field("path");
+            if path.is_empty() { "git diff".to_string() } else { format!("git diff {path}") }
+        }
+        "git_log"    => "git log".to_string(),
         "create_dir" => format!("create directory {}", field("path")),
         "write_file" => format!("write file {}", field("path")),
         "edit_file" => format!("edit file {}", field("path")),
@@ -202,6 +215,58 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "fetch_url",
+                "description": "Fetch the content of a URL and return it as plain text. Strips HTML tags automatically.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "URL to fetch." },
+                        "max_chars": { "type": "integer", "description": "Max characters to return (default 40000)." }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_status",
+                "description": "Show the current git branch, staged/unstaged changes, and untracked files.",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_diff",
+                "description": "Show the git diff. Optionally limit to staged changes or a specific file path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "staged": { "type": "boolean", "description": "Show staged diff (git diff --staged). Default false." },
+                        "path":   { "type": "string",  "description": "Limit diff to this file or directory." },
+                        "ref":    { "type": "string",  "description": "Diff against this ref (e.g. HEAD~1, main)." }
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_log",
+                "description": "Show recent git commit history.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "n":    { "type": "integer", "description": "Number of commits to show (default 20, max 100)." },
+                        "path": { "type": "string",  "description": "Limit log to commits touching this path." }
+                    }
+                }
+            }
+        }),
     ];
 
     if include_write {
@@ -274,14 +339,18 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
 
 pub async fn run(name: &str, arguments: &str) -> String {
     let result = match name {
-        "list_dir" => list_dir(arguments).await,
+        "list_dir"   => list_dir(arguments).await,
         "find_files" => find_files(arguments).await,
         "search_text" => search_text(arguments).await,
-        "read_file" => read_file(arguments).await,
+        "read_file"  => read_file(arguments).await,
         "web_search" => web_search(arguments).await,
+        "fetch_url"  => fetch_url(arguments).await,
+        "git_status" => git_status(arguments).await,
+        "git_diff"   => git_diff(arguments).await,
+        "git_log"    => git_log(arguments).await,
         "create_dir" => create_dir(arguments).await,
         "write_file" => write_file(arguments).await,
-        "edit_file" => edit_file(arguments).await,
+        "edit_file"  => edit_file(arguments).await,
         "run_command" => run_command(arguments).await,
         _ => Err(anyhow!("unknown tool '{name}'")),
     };
@@ -500,6 +569,173 @@ async fn web_search(arguments: &str) -> Result<Value> {
         "ok": true,
         "query": query,
         "results": results
+    }))
+}
+
+// ── fetch_url ─────────────────────────────────────────────────────────────────
+
+async fn fetch_url(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        url: String,
+        #[serde(default)]
+        max_chars: Option<usize>,
+    }
+    let args: Args = parse_args(arguments)?;
+    let url = args.url.trim();
+    if url.is_empty() { bail!("url is required"); }
+    let max_chars = args.max_chars.unwrap_or(40_000);
+
+    let response = http_client()
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch {url}"))?;
+
+    let status = response.status();
+    if !status.is_success() { bail!("HTTP {status}"); }
+
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("text/plain")
+        .to_string();
+
+    let body = response.text().await.context("failed to read response body")?;
+    let text = if content_type.contains("html") || content_type.contains("xml") {
+        html_to_text(&body)
+    } else {
+        body
+    };
+
+    let char_count = text.chars().count();
+    let truncated = char_count > max_chars;
+    let text: String = text.chars().take(max_chars).collect();
+
+    Ok(json!({
+        "ok": true,
+        "url": url,
+        "content_type": content_type,
+        "text": text,
+        "truncated": truncated,
+    }))
+}
+
+fn html_to_text(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    let mut tag_buf = String::new();
+    let mut skip_close: Option<String> = None;
+
+    for c in html.chars() {
+        if let Some(ref close) = skip_close {
+            tag_buf.push(c);
+            if tag_buf.to_lowercase().ends_with(&format!("</{}>", close)) {
+                skip_close = None;
+                tag_buf.clear();
+            }
+            continue;
+        }
+        if c == '<' {
+            in_tag = true;
+            tag_buf.clear();
+        } else if c == '>' {
+            in_tag = false;
+            let raw = tag_buf.trim().to_lowercase();
+            let name = raw.trim_start_matches('/').split_whitespace().next().unwrap_or("");
+            if matches!(name, "script" | "style") && !raw.starts_with('/') {
+                skip_close = Some(name.to_string());
+            }
+            if matches!(name, "p"|"div"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6"|"br"|"li"|"tr"|"section"|"article") {
+                out.push('\n');
+            }
+            tag_buf.clear();
+        } else if in_tag {
+            tag_buf.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+
+    let out = out
+        .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", "\"").replace("&#39;", "'").replace("&nbsp;", " ")
+        .replace("&#x27;", "'").replace("&#x2F;", "/");
+
+    // Collapse blank lines
+    let mut result = String::new();
+    let mut blank = 0usize;
+    for line in out.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            blank += 1;
+            if blank <= 1 { result.push('\n'); }
+        } else {
+            blank = 0;
+            result.push_str(t);
+            result.push('\n');
+        }
+    }
+    result.trim().to_string()
+}
+
+// ── git tools ─────────────────────────────────────────────────────────────────
+
+async fn git_status(_arguments: &str) -> Result<Value> {
+    let out = tokio::process::Command::new("git")
+        .args(["status", "-sb"])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to run git")?;
+    Ok(json!({
+        "ok": out.status.success(),
+        "output": String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        "error": if !out.status.success() { Some(String::from_utf8_lossy(&out.stderr).trim().to_string()) } else { None },
+    }))
+}
+
+async fn git_diff(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize, Default)]
+    struct Args {
+        #[serde(default)] staged: bool,
+        #[serde(default)] path: Option<String>,
+        #[serde(rename = "ref", default)] refspec: Option<String>,
+    }
+    let args: Args = serde_json::from_str(arguments).unwrap_or_default();
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("diff").kill_on_drop(true);
+    if args.staged { cmd.arg("--staged"); }
+    if let Some(r) = &args.refspec { cmd.arg(r); }
+    if let Some(p) = &args.path { cmd.arg("--").arg(p); }
+    let out = cmd.output().await.context("failed to run git diff")?;
+    let diff = String::from_utf8_lossy(&out.stdout).to_string();
+    let truncated = diff.len() > 30_000;
+    Ok(json!({
+        "ok": true,
+        "diff": if truncated { &diff[..30_000] } else { &diff },
+        "truncated": truncated,
+    }))
+}
+
+async fn git_log(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        #[serde(default = "default_n")] n: usize,
+        #[serde(default)] path: Option<String>,
+    }
+    fn default_n() -> usize { 20 }
+    let args: Args = serde_json::from_str(arguments).unwrap_or(Args { n: 20, path: None });
+    let n = args.n.clamp(1, 100);
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["log", "--oneline", "--decorate", &format!("-{n}")]).kill_on_drop(true);
+    if let Some(p) = &args.path { cmd.arg("--").arg(p); }
+    let out = cmd.output().await.context("failed to run git log")?;
+    Ok(json!({
+        "ok": out.status.success(),
+        "log": String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        "error": if !out.status.success() { Some(String::from_utf8_lossy(&out.stderr).trim().to_string()) } else { None },
     }))
 }
 

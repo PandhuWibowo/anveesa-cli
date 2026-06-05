@@ -30,7 +30,8 @@ pub enum TuiEvent {
     Status(String),
     ToolCall(String),
     ToolDone { summary: String, ok: bool },
-    FileOp { verb: String, path: String, added: usize, removed: usize },
+    // diff: Vec<(is_add, line)>
+    FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)> },
     Confirm { summary: String, reply: oneshot::Sender<ApprovalDecision> },
     Usage(Usage),
     Error(String),
@@ -45,7 +46,7 @@ enum Msg {
     User { text: String },
     Assistant { text: String },
     Tool { done: bool, ok: bool, text: String },
-    FileOp { verb: String, path: String, added: usize, removed: usize },
+    FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)> },
     Error(String),
     System(String),
 }
@@ -107,6 +108,7 @@ pub struct App {
     // mode
     mode: Mode,
     confirm: Option<PendingConfirm>,
+    mouse_capture: bool, // when false, terminal native text selection works
 
     // history & session
     history: Vec<ChatMessage>,
@@ -118,6 +120,7 @@ pub struct App {
     pub options: AskOptions,
     pub workspace_context: Option<String>,
     pub policy: ApprovalPolicy,
+    pub mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
 
     // channels
     stream_rx: mpsc::UnboundedReceiver<TuiEvent>,
@@ -143,6 +146,7 @@ impl App {
         workspace_context: Option<String>,
         policy: ApprovalPolicy,
         key_rx: mpsc::UnboundedReceiver<Event>,
+        mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
     ) -> Self {
         let (stream_tx, stream_rx) = mpsc::unbounded_channel();
         let messages = history
@@ -183,6 +187,7 @@ impl App {
 
             mode: Mode::Input,
             confirm: None,
+            mouse_capture: true,
 
             history,
             session_path,
@@ -192,6 +197,7 @@ impl App {
             options,
             workspace_context,
             policy,
+            mcp,
 
             stream_rx,
             stream_tx,
@@ -211,8 +217,52 @@ pub async fn run(mut app: App) -> Result<Vec<ChatMessage>> {
     terminal.clear()?;
     let result = event_loop(&mut terminal, &mut app).await;
     ratatui::restore();
+    // Always release mouse capture on exit so the terminal works normally.
     crossterm::execute!(std::io::stdout(), DisableMouseCapture)?;
     result
+}
+
+fn set_mouse_capture(enabled: bool) {
+    if enabled {
+        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    } else {
+        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    }
+}
+
+
+fn write_to_clipboard(text: &str) -> bool {
+    // macOS
+    if cfg!(target_os = "macos") {
+        if let Ok(mut child) = std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn() {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            return child.wait().map(|s| s.success()).unwrap_or(false);
+        }
+    }
+    // Linux — try wl-copy (Wayland) then xclip (X11) then xsel
+    for cmd in &[
+        ("wl-copy", vec![]),
+        ("xclip", vec!["-selection", "clipboard"]),
+        ("xsel", vec!["--clipboard", "--input"]),
+    ] {
+        if let Ok(mut child) = std::process::Command::new(cmd.0)
+            .args(&cmd.1)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec<ChatMessage>> {
@@ -244,6 +294,26 @@ async fn handle_event(app: &mut App, event: Event) -> Result<()> {
     match event {
         Event::Mouse(MouseEvent { kind, .. }) => handle_mouse(app, kind),
         Event::Key(key) => handle_key(app, key).await?,
+        // Cmd+V / terminal paste — insert text, or attach image if paste is empty
+        Event::Paste(text) => {
+            if app.mode != Mode::Input { return Ok(()); }
+            if text.trim().is_empty() {
+                // Empty paste = user pasted an image (terminal can't forward it as text)
+                // Try to grab it directly from the clipboard
+                if app.images_available {
+                    if let Some(img) = crate::grab_clipboard_image() {
+                        app.pending_image = Some(img);
+                        app.last_image_fp = None;
+                        return Ok(());
+                    }
+                }
+            } else {
+                let normalized = text.replace('\r', "\n");
+                app.input.insert_str(app.input_cursor, &normalized);
+                app.input_cursor += normalized.len();
+                app.hist_idx = None;
+            }
+        }
         Event::Resize(_, _) => {}
         _ => {}
     }
@@ -339,11 +409,30 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
             delete_word_before(&mut app.input, &mut app.input_cursor);
             app.hist_idx = None;
         }
-        KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) && app.images_available => {
-            if let Some(img) = crate::grab_clipboard_image() {
-                app.pending_image = Some(img);
-                app.last_image_fp = None; // force re-attach
+        // Ctrl+V — universal paste: image first, then clipboard text
+        KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.images_available {
+                if let Some(img) = crate::grab_clipboard_image() {
+                    app.pending_image = Some(img);
+                    app.last_image_fp = None;
+                    return Ok(());
+                }
             }
+            // No image — fall back to clipboard text
+            if let Some(text) = crate::read_clipboard_text() {
+                if !text.is_empty() {
+                    let normalized = text.replace('\r', "\n");
+                    app.input.insert_str(app.input_cursor, &normalized);
+                    app.input_cursor += normalized.len();
+                    app.hist_idx = None;
+                }
+            }
+        }
+
+        // Ctrl+M — toggle mouse capture (scroll mode ↔ select mode)
+        KeyCode::Char('m') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.mouse_capture = !app.mouse_capture;
+            set_mouse_capture(app.mouse_capture);
         }
 
         // Editing
@@ -450,10 +539,11 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
         }
         "/help" => {
             app.messages.push(Msg::System(
-                "Commands: /clear  /export [path]  /model [name]  /provider [name]  /status  /exit\n\
+                "Commands: /clear  /copy  /export [path]  /model [name]  /provider [name]  /status  /exit\n\
                  Keys: ↑/↓ history  ←/→ cursor  Home/End  Shift+Enter newline\n\
                  Ctrl+W delete-word  Ctrl+U clear-line  Ctrl+V paste image\n\
-                 PageUp/Dn or scroll wheel to scroll history".into(),
+                 Ctrl+M toggle scroll/select mode  PageUp/Dn scroll\n\
+                 [scroll] = mouse wheel scrolls  [select] = mouse selects text to copy".into(),
             ));
             app.input.clear();
             app.input_cursor = 0;
@@ -470,6 +560,24 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
                 u.completion_tokens,
                 u.total_tokens,
             )));
+            app.input.clear();
+            app.input_cursor = 0;
+            true
+        }
+        "/copy" => {
+            let last = app.messages.iter().rev().find_map(|m| {
+                if let Msg::Assistant { text } = m { Some(text.clone()) } else { None }
+            });
+            match last {
+                Some(text) => {
+                    if write_to_clipboard(&text) {
+                        app.messages.push(Msg::System("Last response copied to clipboard.".into()));
+                    } else {
+                        app.messages.push(Msg::Error("Could not write to clipboard (pbcopy/xclip/wl-copy not found).".into()));
+                    }
+                }
+                None => app.messages.push(Msg::System("No assistant response to copy yet.".into())),
+            }
             app.input.clear();
             app.input_cursor = 0;
             true
@@ -576,6 +684,7 @@ async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
     let history = app.history.clone();
     let workspace_context = app.workspace_context.clone();
     let policy = app.policy;
+    let mcp_arc = app.mcp.clone();
     let tui_tx = app.stream_tx.clone();
     let tui_tx2 = app.stream_tx.clone();
 
@@ -588,6 +697,7 @@ async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
             workspace_context,
             history,
             image,
+            mcp: mcp_arc,
         };
         let result = crate::provider::ask(&config, &provider_name, request, policy, &stream_tx_inner).await;
         drop(stream_tx_inner);
@@ -610,8 +720,13 @@ async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
                 StreamEvent::Status { message } => TuiEvent::Status(message),
                 StreamEvent::ToolCall { summary } => TuiEvent::ToolCall(summary),
                 StreamEvent::ToolResult { summary, ok, .. } => TuiEvent::ToolDone { summary, ok },
-                StreamEvent::FileOp { verb, path, added, removed, .. } =>
-                    TuiEvent::FileOp { verb, path, added, removed },
+                StreamEvent::FileOp { verb, path, added, removed, preview, .. } => {
+                    let diff = preview.into_iter().map(|dl| {
+                        let is_add = matches!(dl.kind, crate::provider::DiffKind::Add);
+                        (is_add, dl.text)
+                    }).collect();
+                    TuiEvent::FileOp { verb, path, added, removed, diff }
+                }
                 StreamEvent::Confirm { preview, reply } => {
                     let summary = match &preview {
                         ToolConfirmPreview::FileOp { verb, path, added, removed, .. } =>
@@ -654,10 +769,10 @@ async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             commit_pending_tool(app, ok);
             app.tool_status = "Thinking".to_string();
         }
-        TuiEvent::FileOp { verb, path, added, removed } => {
+        TuiEvent::FileOp { verb, path, added, removed, diff } => {
             flush_streaming_buf(app);
             commit_pending_tool(app, true);
-            app.messages.push(Msg::FileOp { verb, path, added, removed });
+            app.messages.push(Msg::FileOp { verb, path, added, removed, diff });
         }
         TuiEvent::Confirm { summary, reply } => {
             flush_streaming_buf(app);
@@ -799,7 +914,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
                 )));
                 lines.push(Line::from(""));
             }
-            Msg::FileOp { verb, path, added, removed } => {
+            Msg::FileOp { verb, path, added, removed, diff } => {
                 lines.push(Line::from(vec![
                     Span::styled("  📄 ", Style::default().fg(Color::Rgb(229, 192, 123))),
                     Span::styled(format!("{verb} "), Style::default().fg(Color::White)),
@@ -807,6 +922,25 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
                     Span::styled(format!("  +{added}"), Style::default().fg(Color::Rgb(152, 195, 121))),
                     Span::styled(format!(" -{removed}"), Style::default().fg(Color::Rgb(224, 108, 117))),
                 ]));
+                // Show inline diff (up to 40 lines)
+                for (is_add, line) in diff.iter().take(40) {
+                    let (prefix, color) = if *is_add {
+                        ("  + ", Color::Rgb(152, 195, 121))
+                    } else {
+                        ("  - ", Color::Rgb(224, 108, 117))
+                    };
+                    let bg = if *is_add { Color::Rgb(20, 35, 20) } else { Color::Rgb(35, 20, 20) };
+                    lines.push(Line::from(Span::styled(
+                        format!("{prefix}{}", &line.trim_end().chars().take(width.saturating_sub(6)).collect::<String>()),
+                        Style::default().fg(color).bg(bg),
+                    )));
+                }
+                if diff.len() > 40 {
+                    lines.push(Line::from(Span::styled(
+                        format!("  … {} more lines", diff.len() - 40),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
                 lines.push(Line::from(""));
             }
             Msg::Error(msg) => {
@@ -921,8 +1055,9 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Black).bg(Color::Rgb(229, 192, 123)),
         )
     } else {
-        let hints = "PageUp/Dn · scroll · /help";
-        let left = format!(" {}", app.cwd);
+        let mode_tag = if app.mouse_capture { "[scroll]" } else { "[select]" };
+        let hints = "Ctrl+M mode · /copy · /help";
+        let left = format!(" {} {mode_tag}", app.cwd);
         let right = format!("{hints} ");
         let gap = (area.width as usize)
             .saturating_sub(left.chars().count() + right.chars().count());

@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod mcp;
 pub mod provider;
 pub mod tools;
 pub mod tui;
@@ -154,6 +155,14 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
 
     // ── TUI mode ──────────────────────────────────────────────────────────────
     if is_tty {
+        // Connect to any configured MCP servers.
+        let mcp_manager = if !config.mcp.is_empty() {
+            let m = mcp::McpManager::connect(&config.mcp).await;
+            Some(std::sync::Arc::new(m))
+        } else {
+            None
+        };
+
         // Spawn a background task to read keyboard events (crossterm::event::read is blocking).
         let (key_tx, key_rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::task::spawn_blocking(move || {
@@ -183,6 +192,7 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             workspace_context,
             policy,
             key_rx,
+            mcp_manager,
         );
 
         tui::run(app).await?;
@@ -624,6 +634,7 @@ async fn ask_streaming(
         workspace_context: workspace_context.map(str::to_string),
         history: history.to_vec(),
         image,
+        mcp: None, // REPL path: MCP not yet wired here
     };
 
     let result = provider::ask(config, &provider_name, request, policy, &tx).await;
@@ -1764,16 +1775,20 @@ fn read_prompt_line(
                 buffer.clear_all();
                 display_rows = redraw!();
             }
-            22 if images_available => {
-                // Ctrl+V — paste image from clipboard
-                match grab_clipboard_image() {
-                    Some(img) => {
+            22 => {
+                // Ctrl+V — universal paste: image first, then clipboard text
+                if images_available {
+                    if let Some(img) = grab_clipboard_image() {
                         ctrl_v_image = Some(img);
                         display_rows = redraw!();
+                        continue;
                     }
-                    None => {
-                        print!("\x07");
-                        let _ = io::stdout().flush();
+                }
+                // Fall back to clipboard text via pbpaste / xclip
+                if let Some(text) = read_clipboard_text() {
+                    if !text.is_empty() {
+                        buffer.push_text(&text.replace('\r', "\n"));
+                        display_rows = redraw!();
                     }
                 }
             }
@@ -2311,6 +2326,31 @@ fn repl_history_path() -> Option<PathBuf> {
     let dir = path.parent()?;
     let _ = fs::create_dir_all(dir);
     Some(dir.join("history"))
+}
+
+pub fn read_clipboard_text() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("pbpaste").output().ok()?;
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            if !text.is_empty() { return Some(text); }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    for (cmd, args) in &[
+        ("wl-paste", vec!["--no-newline"]),
+        ("xclip",   vec!["-o", "-selection", "clipboard"]),
+        ("xsel",    vec!["--clipboard", "--output"]),
+    ] {
+        if let Ok(out) = std::process::Command::new(cmd).args(args).output() {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout).into_owned();
+                if !text.is_empty() { return Some(text); }
+            }
+        }
+    }
+    None
 }
 
 pub fn unix_now() -> u64 {

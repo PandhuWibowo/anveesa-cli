@@ -174,6 +174,23 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
+
+    /// MCP servers to connect to on startup.
+    /// Example config:
+    ///   [mcp.filesystem]
+    ///   command = "npx"
+    ///   args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: BTreeMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 impl AppConfig {
@@ -351,6 +368,7 @@ impl AppConfig {
         Self {
             default_provider: Some("sumopod".to_string()),
             providers,
+            mcp: BTreeMap::new(),
         }
     }
 
@@ -375,6 +393,7 @@ impl AppConfig {
             self.default_provider = user_config.default_provider;
         }
         self.providers.extend(user_config.providers);
+        self.mcp.extend(user_config.mcp);
     }
 
     pub fn provider_name<'a>(&'a self, requested: Option<&'a str>) -> Result<&'a str> {
@@ -620,6 +639,7 @@ fn load_user_config_for_write(path: &Path) -> Result<AppConfig> {
         return Ok(AppConfig {
             default_provider: Some("sumopod".to_string()),
             providers: BTreeMap::new(),
+            mcp: BTreeMap::new(),
         });
     }
 

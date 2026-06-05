@@ -222,6 +222,7 @@ mod tests {
             workspace_context: None,
             history: vec![],
             image: None,
+            mcp: None,
         }
     }
 

@@ -1,5 +1,5 @@
 mod command;
-mod openai_compatible;
+pub mod openai_compatible;
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,8 @@ pub struct PromptRequest {
     pub history: Vec<ChatMessage>,
     /// Optional image grabbed from the clipboard for the current turn only.
     pub image: Option<ImageAttachment>,
+    /// Connected MCP servers (runtime only, not part of session history).
+    pub mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
 }
 
 /// How tool calls that modify the system (write/edit/run) should be handled.
