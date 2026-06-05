@@ -87,8 +87,9 @@ pub struct App {
     streaming_started_at: Option<Instant>,
     tool_started_at: Option<Instant>,
     unread_count: usize,
-    // files/dirs already read this session — injected into workspace context each turn
     seen_paths: std::collections::BTreeSet<String>,
+    // undo stack: (path, old_content) — None content means file didn't exist before
+    undo_stack: Vec<(String, Option<String>)>,
 
     // input
     input: String,
@@ -176,6 +177,7 @@ impl App {
             tool_started_at: None,
             unread_count: 0,
             seen_paths: std::collections::BTreeSet::new(),
+            undo_stack: Vec::new(),
 
             input: String::new(),
             input_cursor: 0,
@@ -553,6 +555,7 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
             app.usage = Usage::default();
             app.pending_image = None;
             app.seen_paths.clear();
+            app.undo_stack.clear();
             app.input.clear();
             app.input_cursor = 0;
             if let Some(path) = &app.session_path {
@@ -562,13 +565,20 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
         }
         "/help" => {
             app.messages.push(Msg::System(
-                "Commands: /clear  /compact  /copy  /export [path]\n\
-                 /model [name]  /provider [name]  /status  /exit\n\
+                "Commands:\n\
+                 /clear        reset conversation\n\
+                 /undo         restore last file changed by AI\n\
+                 /compact      drop old turns to free context\n\
+                 /copy         copy last response to clipboard\n\
+                 /export [path] save conversation as markdown\n\
+                 /model [name] · /provider [name] · /status · /exit\n\
                  \n\
                  Keys: ↑/↓ history  ←/→ cursor  Home/End  Shift+Enter newline\n\
                  j/k scroll (when input empty)  PageUp/Dn scroll\n\
-                 Ctrl+W delete-word  Ctrl+U clear-line  Ctrl+V paste\n\
-                 Ctrl+M toggle scroll/select mode".into(),
+                 Ctrl+V paste (image or text)  Ctrl+M scroll/select mode\n\
+                 Ctrl+W delete-word  Ctrl+U clear line\n\
+                 \n\
+                 Search: set BRAVE_SEARCH_API_KEY or SERPER_API_KEY for better results".into(),
             ));
             app.input.clear();
             app.input_cursor = 0;
@@ -602,6 +612,27 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
                     }
                 }
                 None => app.messages.push(Msg::System("No assistant response to copy yet.".into())),
+            }
+            app.input.clear();
+            app.input_cursor = 0;
+            true
+        }
+        "/undo" => {
+            match app.undo_stack.pop() {
+                None => app.messages.push(Msg::System("Nothing to undo.".into())),
+                Some((path, Some(old_content))) => {
+                    match std::fs::write(&path, &old_content) {
+                        Ok(()) => app.messages.push(Msg::System(format!("Restored {path}"))),
+                        Err(e) => app.messages.push(Msg::Error(format!("Undo failed: {e}"))),
+                    }
+                }
+                Some((path, None)) => {
+                    // File was newly created — delete it
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => app.messages.push(Msg::System(format!("Deleted {path} (undo create)"))),
+                        Err(e) => app.messages.push(Msg::Error(format!("Undo failed: {e}"))),
+                    }
+                }
             }
             app.input.clear();
             app.input_cursor = 0;
@@ -838,6 +869,10 @@ async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
         TuiEvent::FileOp { verb, path, added, removed, diff } => {
             flush_streaming_buf(app);
             commit_pending_tool(app, true);
+            // Snapshot for /undo (read current content before the write is reflected in messages)
+            let old_content = std::fs::read_to_string(&path).ok();
+            if app.undo_stack.len() >= 20 { app.undo_stack.remove(0); }
+            app.undo_stack.push((path.clone(), old_content));
             app.messages.push(Msg::FileOp { verb, path, added, removed, diff });
         }
         TuiEvent::Confirm { summary, reply } => {
@@ -950,6 +985,25 @@ fn finish_turn(app: &mut App) {
     if !app.history.is_empty() {
         app.messages.push(Msg::Separator);
     }
+    // Auto-compact when history exceeds ~40K estimated tokens (1 char ≈ 0.25 tokens)
+    auto_compact_if_needed(app);
+}
+
+fn auto_compact_if_needed(app: &mut App) {
+    const TOKEN_THRESHOLD: usize = 40_000;
+    let estimated: usize = app.history.iter().map(|m| m.content.len() / 4).sum();
+    if estimated < TOKEN_THRESHOLD || app.history.len() < 8 {
+        return;
+    }
+    // Drop oldest quarter of turns (keep at least 4 turns)
+    let total_turns = app.history.len() / 2;
+    let drop_turns = (total_turns / 4).max(1).min(total_turns.saturating_sub(4));
+    let drop_msgs = drop_turns * 2;
+    app.history.drain(..drop_msgs);
+    app.seen_paths.clear();
+    app.messages.push(Msg::System(format!(
+        "Auto-compacted: dropped {drop_turns} older turn(s) (~{estimated}K est. tokens). Use /compact for manual control."
+    )));
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -975,7 +1029,11 @@ fn render(frame: &mut Frame, app: &mut App) {
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let version = env!("CARGO_PKG_VERSION");
-    let token_str = if app.usage.total_tokens > 0 {
+    let token_str = if app.mode == Mode::Streaming && !app.streaming_buf.is_empty() {
+        // Live estimate: chars / 4 ≈ tokens
+        let live = app.streaming_buf.len() / 4;
+        format!("  → {live}t")
+    } else if app.usage.total_tokens > 0 {
         format!("  {}↓ {}↑", app.usage.prompt_tokens, app.usage.completion_tokens)
     } else {
         String::new()

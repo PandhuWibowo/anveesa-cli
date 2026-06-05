@@ -60,7 +60,7 @@ pub fn is_write_tool(name: &str) -> bool {
     matches!(
         name,
         "create_dir" | "write_file" | "edit_file" | "run_command"
-        | "delete_file" | "move_file" | "copy_file"
+        | "delete_file" | "move_file" | "copy_file" | "patch_file"
         | "git_commit" | "git_stash" | "git_branch"
     )
 }
@@ -105,6 +105,7 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
             else { "git branch".to_string() }
         }
         "git_commit"  => format!("git commit {}", field("message")),
+        "patch_file"  => format!("patch file {}", field("path")),
         "delete_file" => format!("delete {}", field("path")),
         "move_file"   => format!("move {} → {}", field("from"), field("to")),
         "copy_file"   => format!("copy {} → {}", field("from"), field("to")),
@@ -385,6 +386,32 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
             json!({
                 "type": "function",
                 "function": {
+                    "name": "patch_file",
+                    "description": "Apply multiple targeted replacements to a file in one call. Each patch must match exactly once. Prefer this over multiple edit_file calls when editing the same file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "File path." },
+                            "patches": {
+                                "type": "array",
+                                "description": "Ordered list of replacements to apply sequentially.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "old_string": { "type": "string", "description": "Unique text to replace." },
+                                        "new_string": { "type": "string", "description": "Replacement text." }
+                                    },
+                                    "required": ["old_string", "new_string"]
+                                }
+                            }
+                        },
+                        "required": ["path", "patches"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
                     "name": "delete_file",
                     "description": "Delete a file or empty directory. Use with care — this is irreversible.",
                     "parameters": {
@@ -492,6 +519,7 @@ pub async fn run(name: &str, arguments: &str) -> String {
         "git_stash"   => git_stash(arguments).await,
         "git_branch"  => git_branch(arguments).await,
         "git_commit"  => git_commit(arguments).await,
+        "patch_file"  => patch_file(arguments).await,
         "delete_file" => delete_file(arguments).await,
         "move_file"   => move_file(arguments).await,
         "copy_file"   => copy_file(arguments).await,
@@ -684,7 +712,25 @@ async fn web_search(arguments: &str) -> Result<Value> {
     let query = args.query.trim();
     if query.is_empty() { bail!("query is empty"); }
 
-    // Try DuckDuckGo instant-answer API first
+    // 1. Brave Search API (best quality, free tier available)
+    if let Ok(key) = std::env::var("BRAVE_SEARCH_API_KEY") {
+        if let Ok(results) = search_brave(query, &key).await {
+            if !results.is_empty() {
+                return Ok(json!({ "ok": true, "query": query, "source": "brave", "results": results }));
+            }
+        }
+    }
+
+    // 2. Serper.dev (Google results via API)
+    if let Ok(key) = std::env::var("SERPER_API_KEY") {
+        if let Ok(results) = search_serper(query, &key).await {
+            if !results.is_empty() {
+                return Ok(json!({ "ok": true, "query": query, "source": "serper", "results": results }));
+            }
+        }
+    }
+
+    // 3. DuckDuckGo instant-answer API (no key needed, limited results)
     let api_url = format!(
         "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
         percent_encode(query)
@@ -705,16 +751,13 @@ async fn web_search(arguments: &str) -> Result<Value> {
         }
     }
 
-    // If instant answer had no results, try DuckDuckGo lite (text-only, more reliable)
+    // 4. DuckDuckGo lite HTML fallback
     if results.is_empty() {
-        let lite_url = format!(
-            "https://lite.duckduckgo.com/lite/?q={}",
-            percent_encode(query)
-        );
+        let lite_url = format!("https://lite.duckduckgo.com/lite/?q={}", percent_encode(query));
         if let Ok(resp) = http_client()
             .get(&lite_url)
             .header("Accept-Language", "en-US,en;q=0.9")
-            .header("User-Agent", "Mozilla/5.0 (compatible; anveesa-cli)")
+            .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
             .send()
             .await
         {
@@ -725,7 +768,58 @@ async fn web_search(arguments: &str) -> Result<Value> {
     }
 
     results.truncate(10);
-    Ok(json!({ "ok": true, "query": query, "results": results }))
+    let source = if results.is_empty() { "none" } else { "duckduckgo" };
+    Ok(json!({ "ok": true, "query": query, "source": source, "results": results }))
+}
+
+async fn search_brave(query: &str, api_key: &str) -> Result<Vec<Value>> {
+    let url = format!(
+        "https://api.search.brave.com/res/v1/web/search?q={}&count=10&search_lang=en",
+        percent_encode(query)
+    );
+    let resp = http_client()
+        .get(&url)
+        .header("Accept", "application/json")
+        .header("Accept-Encoding", "gzip")
+        .header("X-Subscription-Token", api_key)
+        .send()
+        .await
+        .context("Brave Search request failed")?;
+
+    if !resp.status().is_success() {
+        bail!("Brave Search HTTP {}", resp.status());
+    }
+    let body: Value = resp.json().await.context("failed to parse Brave response")?;
+    let results = body["web"]["results"].as_array().cloned().unwrap_or_default();
+    Ok(results.into_iter().filter_map(|r| {
+        let title = r["title"].as_str()?;
+        let url   = r["url"].as_str()?;
+        let snip  = r["description"].as_str().unwrap_or("");
+        Some(json!({ "title": title, "snippet": snip, "url": url }))
+    }).collect())
+}
+
+async fn search_serper(query: &str, api_key: &str) -> Result<Vec<Value>> {
+    let resp = http_client()
+        .post("https://google.serper.dev/search")
+        .header("X-API-KEY", api_key)
+        .header("Content-Type", "application/json")
+        .json(&json!({ "q": query, "num": 10 }))
+        .send()
+        .await
+        .context("Serper request failed")?;
+
+    if !resp.status().is_success() {
+        bail!("Serper HTTP {}", resp.status());
+    }
+    let body: Value = resp.json().await.context("failed to parse Serper response")?;
+    let results = body["organic"].as_array().cloned().unwrap_or_default();
+    Ok(results.into_iter().filter_map(|r| {
+        let title = r["title"].as_str()?;
+        let url   = r["link"].as_str()?;
+        let snip  = r["snippet"].as_str().unwrap_or("");
+        Some(json!({ "title": title, "snippet": snip, "url": url }))
+    }).collect())
 }
 
 /// Scrape DuckDuckGo lite (text-only) results page.
@@ -1221,6 +1315,37 @@ async fn write_file(arguments: &str) -> Result<Value> {
         "created": !existed,
         "bytes_written": args.content.len(),
     }))
+}
+
+async fn patch_file(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Hunk { old_string: String, new_string: String }
+    #[derive(Deserialize)]
+    struct Args { path: String, patches: Vec<Hunk> }
+
+    let args: Args = parse_args(arguments)?;
+    let path = resolve_writable_path(&args.path)?;
+    if !path.is_file() { bail!("{} is not a file", path.display()); }
+    if is_sensitive_path(&path) { bail!("refusing to edit sensitive file"); }
+    if args.patches.is_empty() { bail!("patches array is empty"); }
+
+    let mut content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    for (i, hunk) in args.patches.iter().enumerate() {
+        if hunk.old_string.is_empty() { bail!("patch[{i}]: old_string must not be empty"); }
+        if hunk.old_string == hunk.new_string { bail!("patch[{i}]: old_string and new_string are identical"); }
+        let count = content.matches(&hunk.old_string).count();
+        match count {
+            0 => bail!("patch[{i}]: old_string not found in {}", path.display()),
+            1 => {}
+            n => bail!("patch[{i}]: old_string appears {n} times — make it unique"),
+        }
+        content = content.replacen(&hunk.old_string, &hunk.new_string, 1);
+    }
+
+    fs::write(&path, &content).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(json!({ "ok": true, "path": path.display().to_string(), "patches_applied": args.patches.len() }))
 }
 
 async fn edit_file(arguments: &str) -> Result<Value> {

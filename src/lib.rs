@@ -2516,8 +2516,38 @@ fn workspace_context_for(cwd: &Path) -> Result<String> {
                 }
             }
         }
+        // Recent commits give the model useful project history context
+        if let Some(log) = git_output(&cwd, ["log", "--oneline", "--decorate", "-8"]) {
+            if !log.is_empty() {
+                context.push_str("- recent_commits:\n");
+                for line in log.lines() {
+                    context.push_str(&format!("  {line}\n"));
+                }
+            }
+        }
     } else {
         context.push_str("- git: not inside a git repository\n");
+    }
+
+    // Project metadata from package.json / Cargo.toml
+    if let Ok(raw) = fs::read_to_string(cwd.join("package.json")) {
+        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(name) = pkg["name"].as_str() {
+                context.push_str(&format!("- project_name: {name}\n"));
+            }
+            if let Some(ver) = pkg["version"].as_str() {
+                context.push_str(&format!("- project_version: {ver}\n"));
+            }
+            if let Some(desc) = pkg["description"].as_str() {
+                context.push_str(&format!("- project_description: {desc}\n"));
+            }
+        }
+    } else if let Ok(raw) = fs::read_to_string(cwd.join("Cargo.toml")) {
+        for line in raw.lines().take(15) {
+            if line.starts_with("name") || line.starts_with("version") || line.starts_with("description") {
+                context.push_str(&format!("- cargo_{}\n", line.trim()));
+            }
+        }
     }
 
     let entries = directory_entries(cwd)?;
