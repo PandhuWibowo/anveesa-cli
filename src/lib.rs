@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod provider;
 pub mod tools;
+pub mod tui;
 
 use std::{
     fs,
@@ -81,7 +82,8 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         .get(&provider_name)
         .with_context(|| format!("unknown provider '{provider_name}'"))?;
     let _tools_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
-    let mut images_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
+    let images_available = matches!(provider, ProviderConfig::OpenAiCompatible(_));
+    let mut images_available = images_available;
     let model = options
         .model
         .clone()
@@ -150,6 +152,45 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
     );
 
     let is_tty = io::stdout().is_terminal();
+
+    // ── TUI mode ──────────────────────────────────────────────────────────────
+    if is_tty {
+        // Spawn a background task to read keyboard events (crossterm::event::read is blocking).
+        let (key_tx, key_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::task::spawn_blocking(move || {
+            loop {
+                match crossterm::event::read() {
+                    Ok(ev) => { if key_tx.send(ev).is_err() { break; } }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let short_cwd = std::env::var("HOME")
+            .map(|h| cwd.display().to_string().replacen(&h, "~", 1))
+            .unwrap_or_else(|_| cwd.display().to_string());
+
+        let app = tui::App::new(
+            provider_name.clone(),
+            session_options.model.clone().unwrap_or_else(|| "-".to_string()),
+            short_cwd,
+            history,
+            images_available,
+            session_path.clone(),
+            last_saved_at,
+            input_history,
+            config,
+            session_options,
+            workspace_context,
+            policy,
+            key_rx,
+        );
+
+        tui::run(app).await?;
+        return Ok(());
+    }
+    // ── Fallback: plain REPL (non-TTY / piped) ────────────────────────────────
+
     let width = term_width();
     let label = prompt_label(is_tty);
     // Fingerprint of the last clipboard image we attached — prevents re-attaching
@@ -1215,7 +1256,7 @@ fn print_session_info(is_tty: bool, path: Option<&Path>, turns: usize, saved_at:
     println!();
 }
 
-fn export_conversation(path: &std::path::Path, history: &[ChatMessage]) -> Result<()> {
+pub fn export_conversation(path: &std::path::Path, history: &[ChatMessage]) -> Result<()> {
     let mut out = String::new();
     for msg in history {
         match msg.role {
@@ -2081,7 +2122,7 @@ fn image_mime_for_path(path: &Path) -> Option<&'static str> {
 /// Try to grab an image from the system clipboard and return it base64-encoded.
 /// Only supported on macOS; returns None on other platforms or when no image is present.
 #[cfg(target_os = "macos")]
-fn grab_clipboard_image() -> Option<ImageAttachment> {
+pub fn grab_clipboard_image() -> Option<ImageAttachment> {
     read_clipboard_image().ok()
 }
 
@@ -2257,7 +2298,7 @@ fn convert_tiff_to_png(tiff: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn grab_clipboard_image() -> Option<ImageAttachment> {
+pub fn grab_clipboard_image() -> Option<ImageAttachment> {
     None
 }
 
@@ -2273,7 +2314,7 @@ fn repl_history_path() -> Option<PathBuf> {
     Some(dir.join("history"))
 }
 
-fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -2368,6 +2409,16 @@ fn load_interactive_session(path: &Path, cwd: &Path) -> Option<InteractiveSessio
         return None;
     }
     Some(session)
+}
+
+pub fn save_interactive_session_pub(
+    path: &Path,
+    cwd: &Path,
+    provider: &str,
+    options: &AskOptions,
+    history: &[ChatMessage],
+) -> Result<()> {
+    save_interactive_session(path, cwd, provider, options, history)
 }
 
 fn save_interactive_session(
