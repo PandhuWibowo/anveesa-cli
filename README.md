@@ -1,302 +1,207 @@
-# Anveesa
+# anveesa
 
-Anveesa is a Rust terminal wrapper for AI providers. It gives you one command,
-`anveesa`, for interactive prompts and one-shot terminal requests.
+A fast, terminal-native AI coding assistant. One command — interactive TUI or one-shot prompts — backed by any OpenAI-compatible provider.
 
-## 📦 Publishing to npm
+```
+npm install -g anveesa
+anveesa
+```
 
-Anveesa can be published as an npm package via a Node.js wrapper that invokes the Rust binary.
+---
 
-### Install from npm
+## Features
+
+- **Full TUI** — streaming output, diff previews on file edits, cost tracking, plan display
+- **28 built-in tools** — file ops, git, web search, deep-fetch, screenshot, notes, run commands
+- **Multi-provider** — Claude, GPT-4o, Gemini, DeepSeek, local Ollama, any OpenAI-compatible API
+- **Model routing** — `fast_model` for read-only tool rounds, main model for synthesis
+- **Parallel tools** — read-only tool calls run concurrently; write tools stay sequential for approval
+- **Approval flow** — every write/run tool shows a full diff preview; approve once, for the turn, or deny
+- **Multi-image paste** — ⌘V (macOS) / Ctrl+V to queue multiple clipboard images per turn
+- **Project memory** — `.anveesa.md` in your repo root is auto-injected into every session
+- **Path sandboxing** — write tools blocked outside the git root by default
+- **Conversation search** — Ctrl+R to search through all messages
+
+---
+
+## Install
 
 ```bash
+# npm (recommended — downloads prebuilt binary)
 npm install -g anveesa
+
+# Cargo (builds from source)
+cargo install --path .
 ```
 
-## Install locally
-
-```sh
-cargo install --path . --force
-```
+---
 
 ## Quick start
 
-```sh
+```bash
+# 1. Initialize config
 anveesa config init
-export SUMOPOD_API_KEY="..."
-anveesa config set-model "your-sumopod-model"
+
+# 2. Set your API key
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+
+# 3. Launch the TUI
 anveesa
+
+# 4. One-shot prompt
+anveesa "explain the auth middleware in this repo"
+
+# 5. Specific provider/model
+anveesa --provider anthropic --model claude-sonnet-4-6 "refactor src/auth.ts"
 ```
 
-Running `anveesa` with no prompt opens an interactive prompt for the default provider:
+---
 
-```text
-anveesa | provider: sumopod | model: kimi-k2.6
-state   | turns:0 | ctx:on | tools:on | writes:ask | memory:new
-commands| /clear reset | /exit quit
-approve | y once | a all for current turn | enter no
+## Configuration
 
-anveesa[0]>
-```
-
-Interactive mode keeps running after each answer. It also keeps the conversation
-context for the same provider/model/system in the same working directory, even
-after restarting Anveesa. Use `/clear` to reset that context and `/exit` to
-return to the shell.
-
-The prompt has full line editing, and your input history is remembered across
-sessions (stored next to the config as `history`). The active conversation is
-stored next to it as `session.json`. Use the up/down arrows to recall previous
-prompts.
-
-To include an image, copy it to the clipboard and run `/attach` before your
-question:
-
-```text
-❯ /attach
-  [image attached for the next message]
-❯ what is in this screenshot?
-```
-
-You can also attach an image file directly:
-
-```text
-❯ /attach ./screenshot.png
-❯ explain this UI
-```
-
-Image input works with OpenAI-compatible providers and models that support
-vision. Terminals do not paste image pixels into the text prompt itself, so use
-`/attach` instead of pressing paste and expecting the image to appear inline.
-
-`ctx:on` means Anveesa sends lightweight terminal context with each request:
-current directory, parent directory, git root/branch/status when available, and
-a capped directory listing. This lets the model answer questions like "where are
-you?" using the terminal workspace instead of guessing.
-
-`tools:on` means OpenAI-compatible providers can ask Anveesa to inspect the
-workspace: list directories, find files by name, search text, read capped file
-snippets, and do a basic web lookup. The tools can inspect paths outside the
-current project, but obvious secret files such as SSH keys and `.env` files are
-blocked.
-
-`writes:ask` covers the workspace-modifying tools — `create_dir`, `write_file`,
-`edit_file`, and `run_command`. By default Anveesa asks for confirmation on the
-terminal before each one:
-
-```text
-allow run command `cargo test`? [y]es/[a]ll this turn/[N]o
-```
-
-Answer `a` to approve the remaining write/run tools for the current assistant
-turn, which is useful when scaffolding several files.
-
-The indicator reflects the active policy: `writes:ask` (confirm each action,
-the interactive default and the default for one-shot prompts typed directly in a
-terminal), `writes:auto` (run without asking, enabled with `--yes`), or
-`writes:off` (disabled for non-interactive stdin runs unless `--yes` is passed).
-
-Responses stream token-by-token as the model generates them. While Anveesa waits
-for the first token it shows a small status line such as:
-
-```text
-- thinking... 2s
-```
-
-When usage is reported by the provider, a token summary is printed to stderr
-after the answer:
-
-```text
-[tokens: 812 in / 144 out / 956 total]
-```
-
-OpenAI-compatible providers can use up to 32 tool rounds per answer by default.
-After that, Anveesa stops advertising tools and asks the model to produce a
-final answer from the gathered results. Override the cap with
-`ANVEESA_MAX_TOOL_ROUNDS`, up to 256.
-
-Use GLM/Z.ai:
-
-```sh
-export ZAI_API_KEY="..."
-anveesa config set-provider glm
-anveesa config set-model "glm-5.1"
-anveesa "write a rust module outline"
-```
-
-You can also use the default `ask` behavior:
-
-```sh
-anveesa "write a git commit message"
-```
-
-Pipe stdin into a prompt:
-
-```sh
-git diff | anveesa ask --stdin "review this diff"
-```
-
-Let the model make changes. In interactive mode and one-shot terminal prompts,
-it asks before each write or command. Pass `--yes` (`-y`) to allow file writes
-and command execution without prompting:
-
-```sh
-anveesa --provider sumopod --yes "add a Default impl for the Config struct"
-```
-
-Run through Claude Code if the `claude` CLI is installed:
-
-```sh
-anveesa --provider claude-code "summarize this project"
-```
-
-Run through Codex if the `codex` CLI is installed:
-
-```sh
-anveesa --provider codex --model "gpt-5.1-codex" "review this repository"
-```
-
-Run through GitHub Copilot CLI if the `copilot` CLI is installed:
-
-```sh
-anveesa --provider copilot --model "gpt-5.1" "explain this function"
-```
-
-Use Sumopod with its OpenAI-compatible API:
-
-```sh
-export SUMOPOD_API_KEY="..."
-anveesa --provider sumopod --model "your-sumopod-model" "explain this error"
-```
-
-## Built-in providers
-
-OpenAI-compatible API providers:
-
-- `openai`
-- `sumopod`
-
-### How to change the model
-
-You can change the model using these commands:
-
-**Via config file:**
-```bash
-anveesa config set-model "your-model"
-```
-
-**Via command line:**
-```bash
-anveesa --model "your-model" "your prompt"
-```
-
-**Interactive mode:**
-```bash
-anveesa
-# Then select/change model in the prompt
-```
-
-The model can be set per provider (e.g., `sumopod`, `openai`, `openrouter`, etc.) and can be overridden per command with `--model`.
-- `openrouter`
-- `glm`
-- `glm-coding`
-- `deepseek`
-- `gemini`
-- `github-models`
-- `groq`
-- `mistral`
-- `xai`
-- `together`
-- `fireworks`
-- `cerebras`
-- `sambanova`
-- `nvidia`
-- `dashscope`
-- `qwen`
-- `huggingface`
-- `vercel-ai-gateway`
-- `perplexity`
-- `ollama`
-- `lm-studio`
-- `vllm`
-- `litellm`
-- `localai`
-
-Terminal command providers:
-
-- `claude-code`
-- `codex`
-- `copilot`
-
-Check the effective list any time:
-
-```sh
-anveesa providers
-```
-
-## Config
-
-Default path:
-
-```sh
-anveesa config path
-```
-
-The path can be overridden with `ANVEESA_CONFIG`.
-
-Set defaults once:
-
-```sh
-anveesa config set-provider sumopod
-anveesa config set-model "kimi-k2.6"
-```
-
-After that, just run:
-
-```sh
-anveesa
-```
-
-Example provider config:
+Config lives at `~/.config/anveesa/config.toml`.
 
 ```toml
-default_provider = "sumopod"
+default_provider = "anthropic"
 
-[providers.sumopod]
-kind = "openai-compatible"
-base_url = "https://ai.sumopod.com/v1"
-api_key_env = "SUMOPOD_API_KEY"
-default_model = "your-sumopod-model"
+[providers.anthropic]
+api_base      = "https://api.anthropic.com/v1"
+api_key_env   = "ANTHROPIC_API_KEY"
+default_model = "claude-sonnet-4-6"
+fast_model    = "claude-haiku-4-5-20251001"  # cheap model for read-only tool rounds
+prompt_cache  = true
 
-[providers.openrouter]
-kind = "openai-compatible"
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_API_KEY"
+[providers.openai]
+api_base      = "https://api.openai.com/v1"
+api_key_env   = "OPENAI_API_KEY"
+default_model = "gpt-4o"
+fast_model    = "gpt-4o-mini"
 
-[providers.glm]
-kind = "openai-compatible"
-base_url = "https://api.z.ai/api/paas/v4"
-api_key_env = "ZAI_API_KEY"
-default_model = "glm-5.1"
-
-[providers.codex]
-kind = "command"
-command = "codex"
-args = ["exec", "{model_args}", "{prompt}"]
-model_args = ["--model", "{model}"]
-
-[providers.claude-code]
-kind = "command"
-command = "claude"
-args = ["-p", "{system_args}", "{model_args}", "{prompt}"]
-model_args = ["--model", "{model}"]
-system_args = ["--system-prompt", "{system}"]
+[providers.local]
+api_base      = "http://localhost:11434/v1"
+default_model = "qwen2.5-coder:7b"
 ```
 
-Command providers can use placeholders in args or env values:
+### Project instructions
 
-- `{prompt}`
-- `{model}`
-- `{system}`
-- `{model_args}`
-- `{system_args}`
+Drop `.anveesa.md` in your repo root — auto-injected every session:
+
+```markdown
+# My Project
+
+Stack: React 18, TypeScript, Tailwind, Prisma, PostgreSQL
+
+Rules:
+- Use named exports only
+- Tests go in __tests__/ next to the source file
+- Run `pnpm test` before committing
+- DB migrations live in db/migrations/
+```
+
+---
+
+## TUI shortcuts
+
+| Key | Action |
+|---|---|
+| Enter | Submit prompt |
+| Shift+Enter | Newline in input |
+| ↑ / ↓ | Navigate input history |
+| Tab | Complete `/command` or file path |
+| Ctrl+R | Search conversation |
+| `[` / `]` | Navigate file diffs |
+| Enter (on diff) | Expand / collapse diff |
+| ⌘V / Ctrl+V | Paste image or text (repeat to queue multiple) |
+| j / k | Scroll (empty input) |
+| PageUp / PageDn | Scroll |
+| Ctrl+W | Delete word |
+| Ctrl+U | Clear line |
+| Ctrl+C | Cancel / quit |
+
+---
+
+## Slash commands
+
+| Command | Description |
+|---|---|
+| `/help` | Show all shortcuts |
+| `/clear` | Reset conversation |
+| `/compact` | Drop old turns to free context |
+| `/search` | Search conversation (or Ctrl+R) |
+| `/undo` | Restore last AI-modified file |
+| `/copy` | Copy last response to clipboard |
+| `/export [path]` | Save as Markdown |
+| `/model [name]` | Switch model |
+| `/provider [name]` | Switch provider |
+| `/status` | Token and cost info |
+| `/exit` | Quit |
+
+---
+
+## Tools
+
+**File ops:** `read_file` `write_file` `edit_file` `patch_file` `delete_file` `move_file` `copy_file` `create_dir` `list_dir` `find_files` `search_text`
+
+**Git:** `git_status` `git_diff` `git_log` `git_blame` `git_show` `git_commit` `git_stash` `git_branch`
+
+**Web:** `web_search` `fetch_url` `screenshot_url`
+
+**Notes:** `save_note` `read_notes` `search_notes` `delete_note`
+
+**Execution:** `run_command`
+
+### fetch_url modes
+
+```
+fetch_url(url="...", mode="text")   # default — plain text, HTML stripped
+fetch_url(url="...", mode="raw")    # full HTML source
+fetch_url(url="...", mode="deep")   # HTML + all linked CSS (+ JS if include_js=true)
+```
+
+### screenshot_url
+
+```
+screenshot_url(url="https://localhost:3000", full_page=true)
+```
+
+Requires Playwright: `npm install -g playwright && npx playwright install chromium`
+
+---
+
+## Security
+
+- **Approval flow** — file writes and commands show a diff preview before running; `--yes` to auto-approve
+- **Path sandboxing** — writes outside the git root are refused
+- **Dangerous commands** — `rm -rf /`, pipe-to-shell, and similar patterns are hard-blocked
+- **Secret guard** — model is instructed never to expose API keys, `.env` files, or SSH keys
+
+---
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` | Anthropic |
+| `OPENAI_API_KEY` | OpenAI |
+| `GEMINI_API_KEY` | Google Gemini |
+| `BRAVE_SEARCH_API_KEY` | Better web search |
+| `SERPER_API_KEY` | Alternative web search |
+| `ANVEESA_MAX_TOOL_ROUNDS` | Override tool round limit (default 32) |
+
+---
+
+## Build from source
+
+```bash
+git clone https://github.com/PandhuWibowo/anveesa-cli
+cd anveesa-cli
+cargo build --release
+./target/release/anveesa
+```
+
+Requires Rust 1.85+ (2024 edition).
+
+---
+
+MIT License

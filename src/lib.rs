@@ -2518,7 +2518,49 @@ fn workspace_context_for(cwd: &Path) -> Result<String> {
         context.push_str(&format!("- parent: {}\n", parent.display()));
     }
 
+    // .anveesa.md — project-level instructions (highest priority context)
+    let project_md_paths = [cwd.join(".anveesa.md"), cwd.join("ANVEESA.md")];
+    for md_path in &project_md_paths {
+        if let Ok(content) = fs::read_to_string(md_path) {
+            if !content.trim().is_empty() {
+                context.push_str("\nProject instructions (.anveesa.md):\n");
+                let capped: String = content.chars().take(8_000).collect();
+                context.push_str(&capped);
+                context.push('\n');
+            }
+            break;
+        }
+    }
+
+    // README — auto-inject up to 3 000 chars for project overview
+    for readme in &["README.md", "readme.md", "Readme.md"] {
+        if let Ok(content) = fs::read_to_string(cwd.join(readme)) {
+            if !content.trim().is_empty() {
+                context.push_str("\nProject README (first 3000 chars):\n");
+                let capped: String = content.chars().take(3_000).collect();
+                context.push_str(&capped);
+                context.push('\n');
+            }
+            break;
+        }
+    }
+
     if let Some(git_root) = git_output(&cwd, ["rev-parse", "--show-toplevel"]) {
+        // Also check git root for .anveesa.md if different from cwd
+        let git_root_path = std::path::Path::new(&git_root);
+        if git_root_path != cwd {
+            for md_path in &[git_root_path.join(".anveesa.md"), git_root_path.join("ANVEESA.md")] {
+                if let Ok(content) = fs::read_to_string(md_path) {
+                    if !content.trim().is_empty() {
+                        context.push_str("\nProject instructions (from git root):\n");
+                        let capped: String = content.chars().take(8_000).collect();
+                        context.push_str(&capped);
+                        context.push('\n');
+                    }
+                    break;
+                }
+            }
+        }
         context.push_str(&format!("- git_root: {git_root}\n"));
         if let Some(branch) = git_output(&cwd, ["branch", "--show-current"])
             && !branch.is_empty()

@@ -102,6 +102,7 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
         "read_file" => format!("read file {}", field("path")),
         "web_search"  => format!("web search `{}`", field("query")),
         "fetch_url"   => format!("fetch {}", field("url")),
+        "screenshot_url" => format!("screenshot {}", field("url")),
         "git_status"  => "git status".to_string(),
         "git_diff"    => {
             let path = field("path");
@@ -266,6 +267,24 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
                         "mode": { "type": "string", "description": "\"text\" (default, strips HTML), \"raw\" (full HTML source), \"deep\" (HTML source + fetch all linked CSS assets, and JS if include_js=true)." },
                         "max_chars": { "type": "integer", "description": "Max chars per resource (default 40000 for text, 60000 for raw/deep HTML, 30000 per asset)." },
                         "include_js": { "type": "boolean", "description": "deep mode only — also fetch linked JS bundles (default false; bundles can be large)." }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "screenshot_url",
+                "description": "Take a full-page or viewport screenshot of a URL using a headless browser (Playwright). Returns the saved file path and a note. Use when you need to visually inspect a web page, compare UI designs, or verify a running app.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "URL to screenshot." },
+                        "output": { "type": "string", "description": "File path to save the PNG (default: /tmp/anveesa-screenshot-<timestamp>.png)." },
+                        "width": { "type": "integer", "description": "Viewport width in pixels (default 1440)." },
+                        "height": { "type": "integer", "description": "Viewport height in pixels (default 900)." },
+                        "full_page": { "type": "boolean", "description": "Capture the full scrollable page (default false)." }
                     },
                     "required": ["url"]
                 }
@@ -607,6 +626,7 @@ pub async fn run(name: &str, arguments: &str) -> String {
         "write_file" => write_file(arguments).await,
         "edit_file"  => edit_file(arguments).await,
         "run_command" => run_command(arguments).await,
+        "screenshot_url" => screenshot_url(arguments).await,
         _ => Err(anyhow!("unknown tool '{name}'")),
     };
 
@@ -2099,6 +2119,68 @@ fn percent_encode(value: &str) -> String {
             _ => format!("%{byte:02X}"),
         })
         .collect()
+}
+
+// ── screenshot_url ─────────────────────────────────────────────────────────────
+
+async fn screenshot_url(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        url: String,
+        #[serde(default)]
+        output: Option<String>,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        #[serde(default)]
+        full_page: Option<bool>,
+    }
+    let args: Args = parse_args(arguments)?;
+    let url = args.url.trim().to_string();
+    if url.is_empty() { bail!("url is required"); }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let output = args.output.unwrap_or_else(|| format!("/tmp/anveesa-screenshot-{ts}.png"));
+    let width = args.width.unwrap_or(1440);
+    let height = args.height.unwrap_or(900);
+    let viewport = format!("{width},{height}");
+
+    let mut cmd = tokio::process::Command::new("npx");
+    cmd.args(["playwright", "screenshot", "--viewport-size", &viewport]);
+    if args.full_page.unwrap_or(false) {
+        cmd.arg("--full-page");
+    }
+    cmd.arg(&url).arg(&output);
+
+    let result = cmd.output().await;
+    match result {
+        Ok(out) if out.status.success() => {
+            let size_kb = tokio::fs::metadata(&output).await
+                .map(|m| m.len() / 1024)
+                .unwrap_or(0);
+            Ok(json!({
+                "ok": true,
+                "saved_to": output,
+                "url": url,
+                "width": width,
+                "height": height,
+                "size_kb": size_kb,
+                "note": format!("Screenshot saved to {output}. Open it with: open {output}")
+            }))
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!("playwright failed (exit {}): {}", out.status, stderr.trim())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("playwright not found — install with: npm install -g playwright && npx playwright install chromium")
+        }
+        Err(e) => bail!("failed to run playwright: {e}"),
+    }
 }
 
 #[cfg(test)]

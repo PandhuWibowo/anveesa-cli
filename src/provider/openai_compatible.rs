@@ -250,6 +250,93 @@ struct ToolApprovalState {
     call_counts: std::collections::HashMap<(String, String), usize>,
 }
 
+fn git_root() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&cwd)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        Some(std::path::PathBuf::from(s))
+    } else {
+        None
+    }
+}
+
+fn normalize_path(p: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::CurDir => {}
+            _ => out.push(comp),
+        }
+    }
+    out
+}
+
+/// Returns Some(error) if `path_str` resolves to a location outside the sandbox root.
+fn sandbox_check(tool_name: &str, arguments: &str) -> Option<String> {
+    // Tools that don't take a filesystem path — always allowed
+    if matches!(tool_name, "git_commit" | "git_stash" | "git_branch" | "save_note" | "delete_note" | "run_command") {
+        return None;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else { return None };
+    let path_str = args.get("path")
+        .or_else(|| args.get("destination"))
+        .or_else(|| args.get("dest"))
+        .and_then(|v| v.as_str())?;
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let raw = if std::path::Path::new(path_str).is_absolute() {
+        std::path::PathBuf::from(path_str)
+    } else {
+        cwd.join(path_str)
+    };
+    let resolved = normalize_path(&raw);
+    let root = git_root().unwrap_or_else(|| cwd.clone());
+
+    if resolved.starts_with(&root) || resolved.starts_with(&cwd) {
+        None
+    } else {
+        Some(format!(
+            "Path '{}' is outside the project root '{}' — blocked for safety. \
+             Use a path inside the project.",
+            path_str,
+            root.display()
+        ))
+    }
+}
+
+const DANGEROUS_PATTERNS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf ~",
+    "rm -rf $HOME",
+    "dd if=",
+    "mkfs",
+    "> /dev/sda",
+    ":(){ :|:& };:",
+    "chmod -R 777 /",
+    "chown -R",
+    "curl | sh",
+    "curl | bash",
+    "wget | sh",
+    "wget | bash",
+];
+
+fn dangerous_command_check(arguments: &str) -> Option<String> {
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else { return None };
+    let cmd = args["command"].as_str()?;
+    for pat in DANGEROUS_PATTERNS {
+        if cmd.contains(pat) {
+            return Some(format!("blocked: command matches dangerous pattern '{pat}'"));
+        }
+    }
+    None
+}
+
 async fn dispatch_read_only_tool(
     call: PartialToolCall,
     events: UnboundedSender<StreamEvent>,
@@ -355,6 +442,16 @@ async fn dispatch_tool(
     if tools::is_write_tool(&call.name) {
         if !policy.allows_write_tools() {
             return denied_message("write tools are disabled (pass --yes or run interactively)");
+        }
+        // Path sandbox: refuse writes that escape the project root
+        if let Some(err) = sandbox_check(&call.name, &call.arguments) {
+            return json!({"ok": false, "error": err}).to_string();
+        }
+        // Dangerous command patterns
+        if call.name == "run_command" {
+            if let Some(err) = dangerous_command_check(&call.arguments) {
+                return json!({"ok": false, "error": err}).to_string();
+            }
         }
     } else {
         let _ = events.send(StreamEvent::ToolCall {

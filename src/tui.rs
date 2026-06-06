@@ -69,6 +69,7 @@ enum Mode {
     Input,
     Streaming,
     Confirming,
+    Search,
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -117,6 +118,12 @@ pub struct App {
     // message navigation / collapsing
     msg_focus: Option<usize>,
     msg_line_offsets: Vec<usize>,
+
+    // conversation search
+    search_query: String,
+    search_results: Vec<usize>,
+    search_idx: usize,
+    search_scroll_saved: usize,
 
     // tab completion state: (original input, candidates, current index)
     tab_state: Option<(String, Vec<String>, usize)>,
@@ -210,6 +217,11 @@ impl App {
             msg_focus: None,
             msg_line_offsets: Vec::new(),
             tab_state: None,
+
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_idx: 0,
+            search_scroll_saved: 0,
 
             mode: Mode::Input,
             confirm: None,
@@ -395,6 +407,48 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
         return Ok(());
     }
 
+    // ── Search mode ───────────────────────────────────────────────────────────
+    if app.mode == Mode::Search {
+        match code {
+            KeyCode::Esc => {
+                app.mode = Mode::Input;
+                app.auto_scroll = false;
+                app.scroll = app.search_scroll_saved;
+                app.search_query.clear();
+                app.search_results.clear();
+            }
+            KeyCode::Enter | KeyCode::Down
+            | KeyCode::Char('n') => {
+                if !app.search_results.is_empty() {
+                    app.search_idx = (app.search_idx + 1) % app.search_results.len();
+                    let idx = app.search_results[app.search_idx];
+                    if let Some(&off) = app.msg_line_offsets.get(idx) {
+                        app.scroll = off.saturating_sub(2);
+                    }
+                }
+            }
+            KeyCode::Up | KeyCode::Char('p') => {
+                if !app.search_results.is_empty() {
+                    app.search_idx = app.search_idx.checked_sub(1).unwrap_or(app.search_results.len() - 1);
+                    let idx = app.search_results[app.search_idx];
+                    if let Some(&off) = app.msg_line_offsets.get(idx) {
+                        app.scroll = off.saturating_sub(2);
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                app.search_query.pop();
+                update_search(app);
+            }
+            KeyCode::Char(c) => {
+                app.search_query.push(c);
+                update_search(app);
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     // ── Input mode ────────────────────────────────────────────────────────────
     match code {
         // Submit (Enter) or newline (Shift+Enter)
@@ -495,6 +549,15 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
                     app.tab_state = None;
                 }
             }
+        }
+
+        // Ctrl+R — activate conversation search
+        KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.search_scroll_saved = app.scroll;
+            app.search_query.clear();
+            app.search_results.clear();
+            app.search_idx = 0;
+            app.mode = Mode::Search;
         }
 
         // Ctrl+M — toggle mouse capture (scroll mode ↔ select mode)
@@ -633,8 +696,9 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
                  /model [name] · /provider [name] · /status · /exit\n\
                  \n\
                  Keys: ↑/↓ history  ←/→ cursor  Home/End  Shift+Enter newline\n\
-                 Tab   complete /command or file path (press again to cycle)\n\
-                 [ ]   navigate between file diffs  Enter expand/collapse focused diff\n\
+                 Tab     complete /command or file path (press again to cycle)\n\
+                 Ctrl+R  search conversation  (or /search)\n\
+                 [ ]     navigate between file diffs  Enter expand/collapse focused diff\n\
                  j/k scroll (when input empty)  PageUp/Dn scroll\n\
                  ⌘V (macOS) / Ctrl+V  paste image or text (repeat to queue multiple images)\n\
                  Ctrl+W delete-word  Ctrl+U clear line\n\
@@ -700,7 +764,6 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
             true
         }
         "/compact" => {
-            // Keep only the last 10 turns, drop older history to free context
             let keep = 10usize;
             let total_turns = app.history.len() / 2;
             if total_turns <= keep {
@@ -710,19 +773,48 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
             } else {
                 let drop_turns = total_turns - keep;
                 let drop_msgs = drop_turns * 2;
+                // Summarise dropped content before removing it
+                let dropped_text: String = app.history[..drop_msgs].iter()
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                // Extract file paths mentioned in dropped turns
+                let mut files: Vec<&str> = dropped_text.split_whitespace()
+                    .filter(|w| w.contains('/') || w.ends_with(".rs") || w.ends_with(".ts")
+                        || w.ends_with(".py") || w.ends_with(".js") || w.ends_with(".go"))
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                files.sort();
+                files.truncate(12);
+                let file_hint = if files.is_empty() { String::new() }
+                    else { format!("  Files discussed: {}.", files.join(", ")) };
                 app.history.drain(..drop_msgs);
-                // Also remove older messages from the display (keep separators and last N turns)
                 let msg_count = app.messages.len();
                 if msg_count > keep * 3 {
                     app.messages.drain(..(msg_count - keep * 3));
                 }
-                app.seen_paths.clear(); // refresh seen paths for the new context window
+                app.seen_paths.clear();
+                // Inject a context breadcrumb so the model knows what was compacted
+                app.history.insert(0, ChatMessage::user(format!(
+                    "[Context note: {drop_turns} earlier turn(s) were compacted to save context.{file_hint} \
+                     Use read_file / list_dir to re-inspect any files if needed.]"
+                )));
                 app.messages.insert(0, Msg::System(format!(
-                    "Context compacted: dropped {drop_turns} older turn(s), keeping the last {keep}. \
-                     Use /clear to start fresh."
+                    "Context compacted: dropped {drop_turns} older turn(s), keeping the last {keep}.{file_hint}"
                 )));
                 app.messages.push(Msg::Separator);
             }
+            app.input.clear();
+            app.input_cursor = 0;
+            true
+        }
+        "/search" => {
+            app.search_scroll_saved = app.scroll;
+            app.search_query.clear();
+            app.search_results.clear();
+            app.search_idx = 0;
+            app.mode = Mode::Search;
             app.input.clear();
             app.input_cursor = 0;
             true
@@ -786,11 +878,41 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
     }
 }
 
+// ── Conversation search ───────────────────────────────────────────────────────
+
+fn msg_text(msg: &Msg) -> Option<&str> {
+    match msg {
+        Msg::User { text } | Msg::Assistant { text } | Msg::Error(text) | Msg::System(text) => Some(text),
+        Msg::Tool { text, .. } => Some(text),
+        Msg::FileOp { path, .. } => Some(path),
+        Msg::Separator => None,
+    }
+}
+
+fn update_search(app: &mut App) {
+    let q = app.search_query.to_lowercase();
+    app.search_results = if q.is_empty() {
+        vec![]
+    } else {
+        app.messages.iter().enumerate()
+            .filter(|(_, m)| msg_text(m).map(|t| t.to_lowercase().contains(&q)).unwrap_or(false))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    app.search_idx = 0;
+    if let Some(&first) = app.search_results.first() {
+        if let Some(&off) = app.msg_line_offsets.get(first) {
+            app.auto_scroll = false;
+            app.scroll = off.saturating_sub(2);
+        }
+    }
+}
+
 // ── Tab completion ────────────────────────────────────────────────────────────
 
 const SLASH_COMMANDS: &[&str] = &[
     "/clear", "/compact", "/copy", "/exit", "/export",
-    "/help", "/model", "/provider", "/quit", "/status", "/undo",
+    "/help", "/model", "/provider", "/quit", "/search", "/status", "/undo",
 ];
 
 fn tab_complete(app: &mut App) {
@@ -1519,9 +1641,9 @@ fn assistant_header(model: &str) -> Line<'static> {
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     // Border color reflects mode: ready=green, streaming=yellow, confirming=orange
     let border_color = match app.mode {
-        Mode::Input     => Color::Rgb(152, 195, 121), // green — "your turn"
+        Mode::Input | Mode::Search => Color::Rgb(152, 195, 121), // green — "your turn"
         Mode::Streaming => Color::Rgb(229, 192, 123), // yellow — "thinking"
-        Mode::Confirming=> Color::Rgb(224, 108, 117), // red — "needs decision"
+        Mode::Confirming => Color::Rgb(224, 108, 117), // red — "needs decision"
     };
     let block = Block::default()
         .borders(Borders::TOP)
@@ -1529,7 +1651,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.mode != Mode::Input {
+    if app.mode != Mode::Input && app.mode != Mode::Search {
         // Don't show cursor or text while AI is working
         return;
     }
@@ -1608,6 +1730,19 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             frame.render_widget(
                 Paragraph::new(text)
                     .style(Style::default().fg(Color::Rgb(229, 192, 123)).bg(Color::Rgb(30, 28, 20))),
+                area,
+            );
+        }
+        Mode::Search => {
+            let n = app.search_results.len();
+            let pos = if n == 0 { String::new() } else { format!("  {}/{n}", app.search_idx + 1) };
+            let left = format!(" 🔍 {}{pos}", app.search_query);
+            let right = " ↑↓ navigate  Esc close ";
+            let gap = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
+            let text = format!("{left}{}{right}", " ".repeat(gap));
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().fg(Color::White).bg(Color::Rgb(30, 20, 50))),
                 area,
             );
         }
