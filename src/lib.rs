@@ -636,7 +636,7 @@ async fn ask_streaming(
     history: &[ChatMessage],
     workspace_context: Option<&str>,
     policy: ApprovalPolicy,
-    image: Option<ImageAttachment>,
+    image: Option<ImageAttachment>, // single-image path kept for REPL compatibility
     mode: RenderMode,
 ) -> Result<TurnResult> {
     let provider_name = config
@@ -652,7 +652,7 @@ async fn ask_streaming(
         system: options.system.clone(),
         workspace_context: workspace_context.map(str::to_string),
         history: history.to_vec(),
-        image,
+        images: image.into_iter().collect(),
         mcp: None, // REPL path: MCP not yet wired here
     };
 

@@ -822,13 +822,15 @@ fn build_messages(
         messages.push(json!({ "role": role, "content": message.content }));
     }
 
-    // Current user turn — multimodal when a clipboard image is attached.
-    let user_content = match &request.image {
-        Some(img) => json!([
-            { "type": "text", "text": &request.prompt },
-            { "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", img.mime, img.data) } }
-        ]),
-        None => json!(&request.prompt),
+    // Current user turn — multimodal when images are attached.
+    let user_content = if request.images.is_empty() {
+        json!(&request.prompt)
+    } else {
+        let mut parts = vec![json!({ "type": "text", "text": &request.prompt })];
+        for img in &request.images {
+            parts.push(json!({ "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", img.mime, img.data) } }));
+        }
+        json!(parts)
     };
     messages.push(json!({ "role": "user", "content": user_content }));
 

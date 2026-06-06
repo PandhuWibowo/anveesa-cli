@@ -98,7 +98,7 @@ pub struct App {
     input_history: Vec<String>,
     hist_idx: Option<usize>,
     hist_saved: String,
-    pending_image: Option<ImageAttachment>,
+    pending_images: Vec<ImageAttachment>,
     last_image_fp: Option<String>,
     images_available: bool,
 
@@ -193,7 +193,7 @@ impl App {
             input_history,
             hist_idx: None,
             hist_saved: String::new(),
-            pending_image: None,
+            pending_images: Vec::new(),
             last_image_fp: None,
             images_available,
 
@@ -324,11 +324,9 @@ async fn handle_event(app: &mut App, event: Event) -> Result<()> {
         Event::Paste(text) => {
             if app.mode != Mode::Input { return Ok(()); }
             if text.trim().is_empty() {
-                // Empty paste = user pasted an image (terminal can't forward it as text)
-                // Try to grab it directly from the clipboard
                 if app.images_available {
                     if let Some(img) = crate::grab_clipboard_image() {
-                        app.pending_image = Some(img);
+                        app.pending_images.push(img);
                         app.last_image_fp = None;
                         return Ok(());
                     }
@@ -338,6 +336,7 @@ async fn handle_event(app: &mut App, event: Event) -> Result<()> {
                 app.input.insert_str(app.input_cursor, &normalized);
                 app.input_cursor += normalized.len();
                 app.hist_idx = None;
+                app.tab_state = None;
             }
         }
         Event::Resize(_, _) => {}
@@ -475,22 +474,25 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
             delete_word_before(&mut app.input, &mut app.input_cursor);
             app.hist_idx = None;
         }
-        // Ctrl+V — universal paste: image first, then clipboard text
-        KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
+        // Ctrl+V (all platforms) or Cmd+V (macOS) — image first, then text
+        KeyCode::Char('v')
+            if modifiers.contains(KeyModifiers::CONTROL)
+                || (cfg!(target_os = "macos") && modifiers.contains(KeyModifiers::SUPER)) =>
+        {
             if app.images_available {
                 if let Some(img) = crate::grab_clipboard_image() {
-                    app.pending_image = Some(img);
+                    app.pending_images.push(img);
                     app.last_image_fp = None;
                     return Ok(());
                 }
             }
-            // No image — fall back to clipboard text
             if let Some(text) = crate::read_clipboard_text() {
                 if !text.is_empty() {
                     let normalized = text.replace('\r', "\n");
                     app.input.insert_str(app.input_cursor, &normalized);
                     app.input_cursor += normalized.len();
                     app.hist_idx = None;
+                    app.tab_state = None;
                 }
             }
         }
@@ -610,7 +612,7 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
             app.streaming_buf.clear();
             app.accumulated_response.clear();
             app.usage = Usage::default();
-            app.pending_image = None;
+            app.pending_images.clear();
             app.seen_paths.clear();
             app.undo_stack.clear();
             app.input.clear();
@@ -634,7 +636,7 @@ fn handle_slash_command(app: &mut App, text: &str) -> bool {
                  Tab   complete /command or file path (press again to cycle)\n\
                  [ ]   navigate between file diffs  Enter expand/collapse focused diff\n\
                  j/k scroll (when input empty)  PageUp/Dn scroll\n\
-                 Ctrl+V paste (image or text)  Ctrl+M scroll/select mode\n\
+                 ⌘V (macOS) / Ctrl+V  paste image or text (repeat to queue multiple images)\n\
                  Ctrl+W delete-word  Ctrl+U clear line\n\
                  \n\
                  Search: set BRAVE_SEARCH_API_KEY or SERPER_API_KEY for better results".into(),
@@ -874,17 +876,24 @@ async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
     app.pending_prompt = text.clone();
     app.accumulated_response.clear();
 
-    // Auto-attach clipboard image if nothing was explicitly Ctrl+V'd
-    let image = app.pending_image.take().or_else(|| {
-        if !app.images_available { return None; }
-        let img = crate::grab_clipboard_image()?;
-        let fp = crate::image_fingerprint(&img);
-        if app.last_image_fp.as_deref() == Some(&fp) {
-            return None; // same image as last time
+    // Collect explicitly pasted images; if none, auto-attach a new clipboard image once.
+    let images: Vec<crate::provider::ImageAttachment> = if !app.pending_images.is_empty() {
+        std::mem::take(&mut app.pending_images)
+    } else if app.images_available {
+        if let Some(img) = crate::grab_clipboard_image() {
+            let fp = crate::image_fingerprint(&img);
+            if app.last_image_fp.as_deref() == Some(&fp) {
+                vec![]
+            } else {
+                app.last_image_fp = Some(fp);
+                vec![img]
+            }
+        } else {
+            vec![]
         }
-        app.last_image_fp = Some(fp);
-        Some(img)
-    });
+    } else {
+        vec![]
+    };
 
     app.messages.push(Msg::User { text: text.clone() });
     app.input.clear();
@@ -924,7 +933,7 @@ async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
             system: options.system.clone(),
             workspace_context,
             history,
-            image,
+            images,
             mcp: mcp_arc,
         };
         let result = crate::provider::ask(&config, &provider_name, request, policy, &stream_tx_inner).await;
@@ -1525,10 +1534,9 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    if app.input.is_empty() && app.pending_image.is_none() {
-        // Placeholder hint
+    if app.input.is_empty() && app.pending_images.is_empty() {
         frame.render_widget(
-            Paragraph::new("  ❯ Ask anything…  (↑/↓ history · Ctrl+V paste image)")
+            Paragraph::new("  ❯ Ask anything…  (↑/↓ history · ⌘V paste image)")
                 .style(Style::default().fg(Color::Rgb(60, 60, 80))),
             inner,
         );
@@ -1536,7 +1544,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let label = if app.pending_image.is_some() { "  [📎] ❯ " } else { "  ❯ " };
+    let label = match app.pending_images.len() {
+        0 => "  ❯ ".to_string(),
+        1 => "  [📎] ❯ ".to_string(),
+        n => format!("  [📎 ×{n}] ❯ "),
+    };
     let label_w = label.chars().count();
     let display = format!("{label}{}", app.input);
 

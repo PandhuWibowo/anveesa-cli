@@ -49,8 +49,8 @@ pub struct PromptRequest {
     pub system: Option<String>,
     pub workspace_context: Option<String>,
     pub history: Vec<ChatMessage>,
-    /// Optional image grabbed from the clipboard for the current turn only.
-    pub image: Option<ImageAttachment>,
+    /// Images attached to the current turn (clipboard paste or explicit attach).
+    pub images: Vec<ImageAttachment>,
     /// Connected MCP servers (runtime only, not part of session history).
     pub mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
 }
