@@ -50,17 +50,16 @@ pub(super) fn set_mouse_capture(enabled: bool) {
 
 pub(super) fn write_to_clipboard(text: &str) -> bool {
     // macOS
-    if cfg!(target_os = "macos") {
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
+    if cfg!(target_os = "macos")
+        && let Ok(mut child) = std::process::Command::new("pbcopy")
             .stdin(std::process::Stdio::piped())
             .spawn()
-        {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
+    {
+        use std::io::Write;
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(text.as_bytes());
         }
+        return child.wait().map(|s| s.success()).unwrap_or(false);
     }
     // Linux — try wl-copy (Wayland) then xclip (X11) then xsel
     for cmd in &[
@@ -153,8 +152,6 @@ fn context_window_tokens(model: &str) -> usize {
         128_000
     } else if m.contains("gpt-3.5") {
         16_000
-    } else if m.contains("qwen") || m.contains("deepseek") || m.contains("llama") {
-        128_000
     } else {
         128_000
     }
@@ -227,7 +224,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Some(m) if m != &app.model => {
             let short: String = m
                 .split(['/', '-'])
-                .last()
+                .next_back()
                 .unwrap_or(m)
                 .chars()
                 .take(12)

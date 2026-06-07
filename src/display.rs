@@ -293,7 +293,7 @@ pub fn print_file_op(
 
     // Summary: └ Added N lines, removed M lines
     let summary = match (added, removed) {
-        (a, 0) if a == 0 => String::new(),
+        (0, 0) => String::new(),
         (a, 0) => format!("Added {} {}", a, if a == 1 { "line" } else { "lines" }),
         (0, r) => format!("Removed {} {}", r, if r == 1 { "line" } else { "lines" }),
         (a, r) => format!(

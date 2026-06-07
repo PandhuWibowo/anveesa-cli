@@ -349,19 +349,17 @@ pub fn read_prompt_line(
             }
             22 => {
                 // Ctrl+V — universal paste: image first, then clipboard text
-                if images_available {
-                    if let Some(img) = grab_clipboard_image() {
-                        ctrl_v_image = Some(img);
-                        display_rows = redraw!();
-                        continue;
-                    }
+                if images_available && let Some(img) = grab_clipboard_image() {
+                    ctrl_v_image = Some(img);
+                    display_rows = redraw!();
+                    continue;
                 }
                 // Fall back to clipboard text via pbpaste / xclip
-                if let Some(text) = read_clipboard_text() {
-                    if !text.is_empty() {
-                        buffer.push_text(&text.replace('\r', "\n"));
-                        display_rows = redraw!();
-                    }
+                if let Some(text) = read_clipboard_text()
+                    && !text.is_empty()
+                {
+                    buffer.push_text(&text.replace('\r', "\n"));
+                    display_rows = redraw!();
                 }
             }
             23 => {

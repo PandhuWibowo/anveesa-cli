@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
@@ -41,13 +42,13 @@ pub fn list_sessions() -> Result<()> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(session) = serde_json::from_str::<InteractiveSession>(&content) {
-                sessions.push((session.cwd, session.messages.len() / 2, session.saved_at));
-            }
+        if let Ok(content) = fs::read_to_string(&path)
+            && let Ok(session) = serde_json::from_str::<InteractiveSession>(&content)
+        {
+            sessions.push((session.cwd, session.messages.len() / 2, session.saved_at));
         }
     }
-    sessions.sort_by(|a, b| b.2.cmp(&a.2));
+    sessions.sort_by_key(|s| Reverse(s.2));
 
     let is_tty = io::stdout().is_terminal();
     if sessions.is_empty() {
@@ -89,15 +90,15 @@ pub fn clear_sessions(all: bool) -> Result<()> {
     let is_tty = io::stdout().is_terminal();
     if all {
         let mut count = 0usize;
-        if let Some(dir) = sessions_dir() {
-            if let Ok(entries) = fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                        if fs::remove_file(&path).is_ok() {
-                            count += 1;
-                        }
-                    }
+        if let Some(dir) = sessions_dir()
+            && let Ok(entries) = fs::read_dir(&dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json")
+                    && fs::remove_file(&path).is_ok()
+                {
+                    count += 1;
                 }
             }
         }

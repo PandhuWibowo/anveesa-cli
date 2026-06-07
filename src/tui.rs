@@ -205,6 +205,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: String,
         model: String,
@@ -357,12 +358,12 @@ async fn handle_event(app: &mut App, event: Event) -> Result<()> {
                 return Ok(());
             }
             if text.trim().is_empty() {
-                if app.images_available {
-                    if let Some(img) = crate::image::grab_clipboard_image() {
-                        app.kbd.pending_images.push(img);
-                        app.kbd.last_image_fp = None;
-                        return Ok(());
-                    }
+                if app.images_available
+                    && let Some(img) = crate::image::grab_clipboard_image()
+                {
+                    app.kbd.pending_images.push(img);
+                    app.kbd.last_image_fp = None;
+                    return Ok(());
                 }
             } else {
                 let normalized = text.replace('\r', "\n");
@@ -443,26 +444,24 @@ async fn handle_key(
                 app.view.search_query.clear();
                 app.view.search_results.clear();
             }
-            KeyCode::Enter | KeyCode::Down | KeyCode::Char('n') => {
-                if !app.view.search_results.is_empty() {
-                    app.view.search_idx = (app.view.search_idx + 1) % app.view.search_results.len();
-                    let idx = app.view.search_results[app.view.search_idx];
-                    if let Some(&off) = app.view.msg_line_offsets.get(idx) {
-                        app.view.scroll = off.saturating_sub(2);
-                    }
+            KeyCode::Enter | KeyCode::Down | KeyCode::Char('n')
+                if !app.view.search_results.is_empty() =>
+            {
+                app.view.search_idx = (app.view.search_idx + 1) % app.view.search_results.len();
+                let idx = app.view.search_results[app.view.search_idx];
+                if let Some(&off) = app.view.msg_line_offsets.get(idx) {
+                    app.view.scroll = off.saturating_sub(2);
                 }
             }
-            KeyCode::Up | KeyCode::Char('p') => {
-                if !app.view.search_results.is_empty() {
-                    app.view.search_idx = app
-                        .view
-                        .search_idx
-                        .checked_sub(1)
-                        .unwrap_or(app.view.search_results.len() - 1);
-                    let idx = app.view.search_results[app.view.search_idx];
-                    if let Some(&off) = app.view.msg_line_offsets.get(idx) {
-                        app.view.scroll = off.saturating_sub(2);
-                    }
+            KeyCode::Up | KeyCode::Char('p') if !app.view.search_results.is_empty() => {
+                app.view.search_idx = app
+                    .view
+                    .search_idx
+                    .checked_sub(1)
+                    .unwrap_or(app.view.search_results.len() - 1);
+                let idx = app.view.search_results[app.view.search_idx];
+                if let Some(&off) = app.view.msg_line_offsets.get(idx) {
+                    app.view.scroll = off.saturating_sub(2);
                 }
             }
             KeyCode::Backspace => {
@@ -572,21 +571,21 @@ async fn handle_key(
             if modifiers.contains(KeyModifiers::CONTROL)
                 || (cfg!(target_os = "macos") && modifiers.contains(KeyModifiers::SUPER)) =>
         {
-            if app.images_available {
-                if let Some(img) = crate::image::grab_clipboard_image() {
-                    app.kbd.pending_images.push(img);
-                    app.kbd.last_image_fp = None;
-                    return Ok(());
-                }
+            if app.images_available
+                && let Some(img) = crate::image::grab_clipboard_image()
+            {
+                app.kbd.pending_images.push(img);
+                app.kbd.last_image_fp = None;
+                return Ok(());
             }
-            if let Some(text) = crate::image::read_clipboard_text() {
-                if !text.is_empty() {
-                    let normalized = text.replace('\r', "\n");
-                    app.kbd.input.insert_str(app.kbd.input_cursor, &normalized);
-                    app.kbd.input_cursor += normalized.len();
-                    app.kbd.hist_idx = None;
-                    app.kbd.tab_state = None;
-                }
+            if let Some(text) = crate::image::read_clipboard_text()
+                && !text.is_empty()
+            {
+                let normalized = text.replace('\r', "\n");
+                app.kbd.input.insert_str(app.kbd.input_cursor, &normalized);
+                app.kbd.input_cursor += normalized.len();
+                app.kbd.hist_idx = None;
+                app.kbd.tab_state = None;
             }
         }
 
@@ -606,25 +605,21 @@ async fn handle_key(
         }
 
         // Editing
-        KeyCode::Backspace => {
-            if app.kbd.input_cursor > 0 {
-                let len = prev_char_len(&app.kbd.input, app.kbd.input_cursor);
-                let start = app.kbd.input_cursor - len;
-                app.kbd.input.drain(start..app.kbd.input_cursor);
-                app.kbd.input_cursor = start;
-                app.kbd.hist_idx = None;
-                app.kbd.tab_state = None;
-            }
+        KeyCode::Backspace if app.kbd.input_cursor > 0 => {
+            let len = prev_char_len(&app.kbd.input, app.kbd.input_cursor);
+            let start = app.kbd.input_cursor - len;
+            app.kbd.input.drain(start..app.kbd.input_cursor);
+            app.kbd.input_cursor = start;
+            app.kbd.hist_idx = None;
+            app.kbd.tab_state = None;
         }
-        KeyCode::Delete => {
-            if app.kbd.input_cursor < app.kbd.input.len() {
-                let len = next_char_len(&app.kbd.input, app.kbd.input_cursor);
-                app.kbd
-                    .input
-                    .drain(app.kbd.input_cursor..app.kbd.input_cursor + len);
-                app.kbd.hist_idx = None;
-                app.kbd.tab_state = None;
-            }
+        KeyCode::Delete if app.kbd.input_cursor < app.kbd.input.len() => {
+            let len = next_char_len(&app.kbd.input, app.kbd.input_cursor);
+            app.kbd
+                .input
+                .drain(app.kbd.input_cursor..app.kbd.input_cursor + len);
+            app.kbd.hist_idx = None;
+            app.kbd.tab_state = None;
         }
 
         // Cursor movement
@@ -634,20 +629,18 @@ async fn handle_key(
         KeyCode::End => app.kbd.input_cursor = app.kbd.input.len(),
 
         // History navigation
-        KeyCode::Up => {
-            if !app.kbd.input_history.is_empty() {
-                let new_idx = match app.kbd.hist_idx {
-                    None => {
-                        app.kbd.hist_saved = app.kbd.input.clone();
-                        app.kbd.input_history.len() - 1
-                    }
-                    Some(0) => 0,
-                    Some(i) => i - 1,
-                };
-                app.kbd.hist_idx = Some(new_idx);
-                app.kbd.input = app.kbd.input_history[new_idx].clone();
-                app.kbd.input_cursor = app.kbd.input.len();
-            }
+        KeyCode::Up if !app.kbd.input_history.is_empty() => {
+            let new_idx = match app.kbd.hist_idx {
+                None => {
+                    app.kbd.hist_saved = app.kbd.input.clone();
+                    app.kbd.input_history.len() - 1
+                }
+                Some(0) => 0,
+                Some(i) => i - 1,
+            };
+            app.kbd.hist_idx = Some(new_idx);
+            app.kbd.input = app.kbd.input_history[new_idx].clone();
+            app.kbd.input_cursor = app.kbd.input.len();
         }
         KeyCode::Down => match app.kbd.hist_idx {
             None => {}

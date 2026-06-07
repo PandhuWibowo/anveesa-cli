@@ -30,11 +30,11 @@ pub(super) fn update_search(app: &mut App) {
             .collect()
     };
     app.view.search_idx = 0;
-    if let Some(&first) = app.view.search_results.first() {
-        if let Some(&off) = app.view.msg_line_offsets.get(first) {
-            app.view.auto_scroll = false;
-            app.view.scroll = off.saturating_sub(2);
-        }
+    if let Some(&first) = app.view.search_results.first()
+        && let Some(&off) = app.view.msg_line_offsets.get(first)
+    {
+        app.view.auto_scroll = false;
+        app.view.scroll = off.saturating_sub(2);
     }
 }
 

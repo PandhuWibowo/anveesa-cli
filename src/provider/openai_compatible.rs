@@ -463,12 +463,12 @@ async fn dispatch_tool(
         return json!({"ok": true}).to_string();
     }
     if call.name == "complete_task" {
-        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
-            if let Some(index) = args["index"].as_u64() {
-                let _ = events.send(StreamEvent::PlanTaskDone {
-                    index: index as usize,
-                });
-            }
+        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments)
+            && let Some(index) = args["index"].as_u64()
+        {
+            let _ = events.send(StreamEvent::PlanTaskDone {
+                index: index as usize,
+            });
         }
         return json!({"ok": true}).to_string();
     }
@@ -500,10 +500,10 @@ async fn dispatch_tool(
             return json!({"ok": false, "error": err}).to_string();
         }
         // Dangerous command patterns
-        if call.name == "run_command" {
-            if let Some(err) = dangerous_command_check(&call.arguments) {
-                return json!({"ok": false, "error": err}).to_string();
-            }
+        if call.name == "run_command"
+            && let Some(err) = dangerous_command_check(&call.arguments)
+        {
+            return json!({"ok": false, "error": err}).to_string();
         }
     } else {
         let _ = events.send(StreamEvent::ToolCall {
@@ -562,14 +562,12 @@ async fn dispatch_tool(
 
     // When the user already reviewed the diff in the approval preview, skip the
     // post-run FileOp so the same diff isn't printed twice.
-    if !preview_was_shown {
-        if let Some(snapshot) = file_op_snapshot {
-            if let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&result) {
-                if result_json["ok"].as_bool().unwrap_or(false) {
-                    emit_file_op_event(snapshot, &result_json, events);
-                }
-            }
-        }
+    if !preview_was_shown
+        && let Some(snapshot) = file_op_snapshot
+        && let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&result)
+        && result_json["ok"].as_bool().unwrap_or(false)
+    {
+        emit_file_op_event(snapshot, &result_json, events);
     }
 
     result
@@ -998,7 +996,7 @@ fn build_messages(
 /// 2. The last history message before the current user turn (grows each turn).
 ///
 /// Everything up to each breakpoint is served from cache on subsequent turns.
-fn apply_cache_breakpoints(messages: &mut Vec<Value>) {
+fn apply_cache_breakpoints(messages: &mut [Value]) {
     let current_turn_idx = messages.len() - 1;
 
     // Breakpoint 1: last system message
@@ -1252,12 +1250,8 @@ impl StreamState {
             self.usage = parse_usage(usage);
         }
 
-        let Some(choices) = chunk.get("choices") else {
-            return None;
-        };
-        let Some(first_choice) = choices.get(0) else {
-            return None;
-        };
+        let choices = chunk.get("choices")?;
+        let first_choice = choices.get(0)?;
 
         // `finish_reason` is a sibling of `delta` and only carries a string on the
         // final chunk for the choice (it's null on every intermediate chunk).
@@ -1265,9 +1259,7 @@ impl StreamState {
             self.finish_reason = Some(reason.to_string());
         }
 
-        let Some(delta) = first_choice.get("delta") else {
-            return None;
-        };
+        let delta = first_choice.get("delta")?;
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in tool_calls {

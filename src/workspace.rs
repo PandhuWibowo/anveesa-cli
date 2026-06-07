@@ -50,7 +50,7 @@ pub fn workspace_context_for(cwd: &Path) -> Result<String> {
         }
     }
 
-    if let Some(git_root) = git_output(&cwd, ["rev-parse", "--show-toplevel"]) {
+    if let Some(git_root) = git_output(cwd, ["rev-parse", "--show-toplevel"]) {
         // Also check git root for .anveesa.md if different from cwd
         let git_root_path = std::path::Path::new(&git_root);
         if git_root_path != cwd {
@@ -70,12 +70,12 @@ pub fn workspace_context_for(cwd: &Path) -> Result<String> {
             }
         }
         context.push_str(&format!("- git_root: {git_root}\n"));
-        if let Some(branch) = git_output(&cwd, ["branch", "--show-current"])
+        if let Some(branch) = git_output(cwd, ["branch", "--show-current"])
             && !branch.is_empty()
         {
             context.push_str(&format!("- git_branch: {branch}\n"));
         }
-        if let Some(status) = git_output(&cwd, ["status", "--short"]) {
+        if let Some(status) = git_output(cwd, ["status", "--short"]) {
             if status.is_empty() {
                 context.push_str("- git_status: clean\n");
             } else {
@@ -86,16 +86,16 @@ pub fn workspace_context_for(cwd: &Path) -> Result<String> {
             }
         }
         // Recent commits give the model useful project history context
-        if let Some(log) = git_output(&cwd, ["log", "--oneline", "--decorate", "-8"]) {
-            if !log.is_empty() {
-                context.push_str("- recent_commits:\n");
-                for line in log.lines() {
-                    context.push_str(&format!("  {line}\n"));
-                }
+        if let Some(log) = git_output(cwd, ["log", "--oneline", "--decorate", "-8"])
+            && !log.is_empty()
+        {
+            context.push_str("- recent_commits:\n");
+            for line in log.lines() {
+                context.push_str(&format!("  {line}\n"));
             }
         }
         // Repo map — all tracked source files grouped by directory
-        if let Some(files) = git_output(&cwd, ["ls-files", "--cached"]) {
+        if let Some(files) = git_output(cwd, ["ls-files", "--cached"]) {
             const SOURCE_EXTS: &[&str] = &[
                 ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".kt", ".swift", ".c",
                 ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".vue", ".svelte", ".toml", ".yaml",

@@ -164,7 +164,7 @@ trait EmptyStrExt {
     fn if_empty(self, fallback: &'static str) -> Self;
 }
 
-impl<'a> EmptyStrExt for &'a str {
+impl EmptyStrExt for &str {
     fn if_empty(self, fallback: &'static str) -> Self {
         if self.is_empty() { fallback } else { self }
     }
@@ -862,25 +862,19 @@ async fn web_search(arguments: &str) -> Result<Value> {
     }
 
     // 1. Brave Search API (best quality, free tier available)
-    if let Ok(key) = std::env::var("BRAVE_SEARCH_API_KEY") {
-        if let Ok(results) = search_brave(query, &key).await {
-            if !results.is_empty() {
-                return Ok(
-                    json!({ "ok": true, "query": query, "source": "brave", "results": results }),
-                );
-            }
-        }
+    if let Ok(key) = std::env::var("BRAVE_SEARCH_API_KEY")
+        && let Ok(results) = search_brave(query, &key).await
+        && !results.is_empty()
+    {
+        return Ok(json!({ "ok": true, "query": query, "source": "brave", "results": results }));
     }
 
     // 2. Serper.dev (Google results via API)
-    if let Ok(key) = std::env::var("SERPER_API_KEY") {
-        if let Ok(results) = search_serper(query, &key).await {
-            if !results.is_empty() {
-                return Ok(
-                    json!({ "ok": true, "query": query, "source": "serper", "results": results }),
-                );
-            }
-        }
+    if let Ok(key) = std::env::var("SERPER_API_KEY")
+        && let Ok(results) = search_serper(query, &key).await
+        && !results.is_empty()
+    {
+        return Ok(json!({ "ok": true, "query": query, "source": "serper", "results": results }));
     }
 
     // 3. DuckDuckGo instant-answer API (no key needed, limited results)
@@ -889,19 +883,19 @@ async fn web_search(arguments: &str) -> Result<Value> {
         percent_encode(query)
     );
     let mut results = Vec::new();
-    if let Ok(resp) = http_client().get(&api_url).send().await {
-        if let Ok(response) = resp.json::<Value>().await {
-            if let Some(abstract_text) = response.get("AbstractText").and_then(Value::as_str)
-                && !abstract_text.is_empty()
-            {
-                results.push(json!({
-                    "title": response.get("Heading").and_then(Value::as_str).unwrap_or(""),
-                    "snippet": abstract_text,
-                    "url": response.get("AbstractURL").and_then(Value::as_str).unwrap_or("")
-                }));
-            }
-            collect_related_topics(response.get("RelatedTopics"), &mut results);
+    if let Ok(resp) = http_client().get(&api_url).send().await
+        && let Ok(response) = resp.json::<Value>().await
+    {
+        if let Some(abstract_text) = response.get("AbstractText").and_then(Value::as_str)
+            && !abstract_text.is_empty()
+        {
+            results.push(json!({
+                "title": response.get("Heading").and_then(Value::as_str).unwrap_or(""),
+                "snippet": abstract_text,
+                "url": response.get("AbstractURL").and_then(Value::as_str).unwrap_or("")
+            }));
         }
+        collect_related_topics(response.get("RelatedTopics"), &mut results);
     }
 
     // 4. DuckDuckGo lite HTML fallback
@@ -919,10 +913,9 @@ async fn web_search(arguments: &str) -> Result<Value> {
             )
             .send()
             .await
+            && let Ok(body) = resp.text().await
         {
-            if let Ok(body) = resp.text().await {
-                results = scrape_ddg_lite(&body, 8);
-            }
+            results = scrape_ddg_lite(&body, 8);
         }
     }
 
@@ -1012,7 +1005,7 @@ fn scrape_ddg_lite(html: &str, max: usize) -> Vec<Value> {
         let block = pos + a_pos;
 
         let url = extract_attr(&html[block..block.min(html.len()).min(block + 300)], "href")
-            .map(|u| clean_ddg_url(u))
+            .map(clean_ddg_url)
             .unwrap_or_default();
         let title = extract_tag_text(&html[block..block.min(html.len()).min(block + 300)], "a")
             .unwrap_or_default();
@@ -1140,12 +1133,11 @@ fn extract_asset_urls(html: &str, base_url: &str, include_js: bool) -> Vec<Strin
             None
         };
 
-        if let Some(h) = href {
-            if let Some(resolved) = resolve_asset_url(&h, &origin, &base_path) {
-                if !urls.contains(&resolved) {
-                    urls.push(resolved);
-                }
-            }
+        if let Some(h) = href
+            && let Some(resolved) = resolve_asset_url(&h, &origin, &base_path)
+            && !urls.contains(&resolved)
+        {
+            urls.push(resolved);
         }
     }
     urls

@@ -50,7 +50,7 @@ pub(super) fn format_assistant_lines(text: &str, width: usize) -> Vec<Line<'stat
                 )));
             } else {
                 in_code = true;
-                code_lang = raw[3..].trim().to_string();
+                code_lang = raw.strip_prefix("```").unwrap_or("").trim().to_string();
                 let lang = if code_lang.is_empty() {
                     String::new()
                 } else {
@@ -85,25 +85,25 @@ fn format_prose_line(line: &str) -> Line<'static> {
         return Line::from("");
     }
 
-    if line.starts_with("### ") {
+    if let Some(rest) = line.strip_prefix("### ") {
         return Line::from(Span::styled(
-            format!("    {}", &line[4..]),
+            format!("    {rest}"),
             Style::default()
                 .fg(Color::Rgb(198, 160, 246))
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    if line.starts_with("## ") {
+    if let Some(rest) = line.strip_prefix("## ") {
         return Line::from(Span::styled(
-            format!("    {}", &line[3..]),
+            format!("    {rest}"),
             Style::default()
                 .fg(Color::Rgb(198, 160, 246))
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         ));
     }
-    if line.starts_with("# ") {
+    if let Some(rest) = line.strip_prefix("# ") {
         return Line::from(Span::styled(
-            format!("    {}", &line[2..]),
+            format!("    {rest}"),
             Style::default()
                 .fg(Color::Rgb(198, 160, 246))
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -385,13 +385,13 @@ pub(super) fn move_cursor_right(s: &str, pos: &mut usize) {
 }
 
 pub(super) fn delete_word_before(s: &mut String, pos: &mut usize) {
-    while *pos > 0 && s[..*pos].ends_with(|c: char| c == ' ' || c == '\n') {
+    while *pos > 0 && s[..*pos].ends_with([' ', '\n']) {
         let len = prev_char_len(s, *pos);
         let start = *pos - len;
         s.drain(start..*pos);
         *pos = start;
     }
-    while *pos > 0 && !s[..*pos].ends_with(|c: char| c == ' ' || c == '\n') {
+    while *pos > 0 && !s[..*pos].ends_with([' ', '\n']) {
         let len = prev_char_len(s, *pos);
         let start = *pos - len;
         s.drain(start..*pos);

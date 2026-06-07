@@ -136,16 +136,16 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
     // Per-project config: .anveesa.toml (extended) or .anveesa (plain system prompt)
     if let Ok(raw) = fs::read_to_string(cwd.join(".anveesa.toml")) {
         if let Ok(cfg) = toml::from_str::<toml::Value>(&raw) {
-            if session_options.system.is_none() {
-                if let Some(sp) = cfg.get("system_prompt").and_then(|v| v.as_str()) {
-                    session_options.system = Some(sp.trim().to_string());
-                }
+            if session_options.system.is_none()
+                && let Some(sp) = cfg.get("system_prompt").and_then(|v| v.as_str())
+            {
+                session_options.system = Some(sp.trim().to_string());
             }
             // Override model if not set by CLI
-            if session_options.model.is_none() {
-                if let Some(m) = cfg.get("model").and_then(|v| v.as_str()) {
-                    session_options.model = Some(m.to_string());
-                }
+            if session_options.model.is_none()
+                && let Some(m) = cfg.get("model").and_then(|v| v.as_str())
+            {
+                session_options.model = Some(m.to_string());
             }
             // auto_approve
             if let Some(true) = cfg.get("auto_approve").and_then(|v| v.as_bool()) {
@@ -153,12 +153,12 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 images_available = true; // keep as-is; just document capability
             }
         }
-    } else if session_options.system.is_none() {
-        if let Ok(text) = fs::read_to_string(cwd.join(".anveesa")) {
-            let trimmed = text.trim().to_string();
-            if !trimmed.is_empty() {
-                session_options.system = Some(trimmed);
-            }
+    } else if session_options.system.is_none()
+        && let Ok(text) = fs::read_to_string(cwd.join(".anveesa"))
+    {
+        let trimmed = text.trim().to_string();
+        if !trimmed.is_empty() {
+            session_options.system = Some(trimmed);
         }
     }
 
@@ -198,14 +198,9 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         // Spawn a background task to read keyboard events (crossterm::event::read is blocking).
         let (key_tx, key_rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::task::spawn_blocking(move || {
-            loop {
-                match crossterm::event::read() {
-                    Ok(ev) => {
-                        if key_tx.send(ev).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok(ev) = crossterm::event::read() {
+                if key_tx.send(ev).is_err() {
+                    break;
                 }
             }
         });
@@ -482,8 +477,8 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 }
                 history.push(ChatMessage::user(prompt));
                 history.push(ChatMessage::assistant(result.text));
-                if let Some(path) = &session_path {
-                    if save_interactive_session(
+                if let Some(path) = &session_path
+                    && save_interactive_session(
                         path,
                         &cwd,
                         &provider_name,
@@ -491,9 +486,8 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                         &history,
                     )
                     .is_ok()
-                    {
-                        last_saved_at = unix_now();
-                    }
+                {
+                    last_saved_at = unix_now();
                 }
             }
             Some(Err(error)) => {
@@ -507,8 +501,8 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 history.push(ChatMessage::assistant(format!(
                     "The previous turn failed inside Anveesa before a final answer was produced: {error:#}"
                 )));
-                if let Some(path) = &session_path {
-                    if save_interactive_session(
+                if let Some(path) = &session_path
+                    && save_interactive_session(
                         path,
                         &cwd,
                         &provider_name,
@@ -516,9 +510,8 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                         &history,
                     )
                     .is_ok()
-                    {
-                        last_saved_at = unix_now();
-                    }
+                {
+                    last_saved_at = unix_now();
                 }
             }
             None => {
@@ -583,6 +576,7 @@ async fn run_ask(options: AskOptions, prompt_parts: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ask_streaming(
     config: &AppConfig,
     options: &AskOptions,

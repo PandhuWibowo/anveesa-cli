@@ -382,23 +382,23 @@ pub(super) fn finish_turn(app: &mut App) {
         let prompt = std::mem::take(&mut app.live.pending_prompt);
         app.conv.history.push(ChatMessage::user(prompt));
         app.conv.history.push(ChatMessage::assistant(response));
-        if let Some(path) = &app.conv.session_path {
-            if let Ok(cwd) = std::env::current_dir() {
-                let _ = crate::session::save_interactive_session(
-                    path,
-                    &cwd,
-                    &app.provider,
-                    &app.options,
-                    &app.conv.history,
-                );
-                app.conv.last_saved_at = crate::unix_now();
-            }
+        if let Some(path) = &app.conv.session_path
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            let _ = crate::session::save_interactive_session(
+                path,
+                &cwd,
+                &app.provider,
+                &app.options,
+                &app.conv.history,
+            );
+            app.conv.last_saved_at = crate::unix_now();
         }
     }
-    if let Some(started) = app.live.streaming_started_at {
-        if started.elapsed() > Duration::from_secs(8) {
-            super::render::send_desktop_notification("anveesa", "Task complete");
-        }
+    if let Some(started) = app.live.streaming_started_at
+        && started.elapsed() > Duration::from_secs(8)
+    {
+        super::render::send_desktop_notification("anveesa", "Task complete");
     }
     app.mode = Mode::Input;
     app.live.tool_status.clear();

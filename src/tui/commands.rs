@@ -231,13 +231,12 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                         &dummy_tx,
                     )
                     .await
+                        && !result.text.is_empty()
                     {
-                        if !result.text.is_empty() {
-                            let _ = tx.send(TuiEvent::SystemMsg(format!(
-                                "Compact summary: {}",
-                                result.text.trim()
-                            )));
-                        }
+                        let _ = tx.send(TuiEvent::SystemMsg(format!(
+                            "Compact summary: {}",
+                            result.text.trim()
+                        )));
                     }
                 });
             }

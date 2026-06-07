@@ -161,7 +161,7 @@ impl McpServer {
                     .get("inputSchema")
                     .cloned()
                     .unwrap_or(json!({"type":"object","properties":{}}));
-                let safe_server = self.name.replace('-', "_").replace('.', "_");
+                let safe_server = self.name.replace(['-', '.'], "_");
                 Some(McpTool {
                     name: format!("mcp__{safe_server}__{original_name}"),
                     description,
