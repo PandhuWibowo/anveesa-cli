@@ -129,6 +129,16 @@ pub fn clear_sessions(all: bool) -> Result<()> {
     Ok(())
 }
 
+/// Format a Unix timestamp as a human-friendly relative age string.
+///
+/// # Examples
+///
+/// ```
+/// use anveesa::session::format_session_age;
+///
+/// let age = format_session_age(None);
+/// assert_eq!(age, "unknown age");
+/// ```
 pub fn format_session_age(saved_at: Option<u64>) -> String {
     let Some(ts) = saved_at else {
         return "unknown age".to_string();
@@ -146,6 +156,18 @@ pub fn format_session_age(saved_at: Option<u64>) -> String {
 }
 
 /// FNV-1a 64-bit hash of the cwd path — used as a stable per-directory session filename.
+///
+/// # Examples
+///
+/// ```
+/// use anveesa::session::cwd_session_hash;
+/// use std::path::Path;
+///
+/// let p = Path::new("/project");
+/// let h = cwd_session_hash(p);
+/// assert_eq!(h.len(), 16);
+/// assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+/// ```
 pub fn cwd_session_hash(cwd: &Path) -> String {
     let s = cwd.to_string_lossy();
     let mut h: u64 = 14695981039346656037;

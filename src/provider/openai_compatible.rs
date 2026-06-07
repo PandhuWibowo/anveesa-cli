@@ -1,5 +1,9 @@
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+#[path = "openai_compatible_tests.rs"]
+mod openai_compatible_tests;
+
 use anyhow::{Context, Result, bail};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
@@ -352,6 +356,8 @@ const DANGEROUS_PATTERNS: &[&str] = &[
     "curl | bash",
     "wget | sh",
     "wget | bash",
+    "| sh",
+    "| bash",
 ];
 
 fn dangerous_command_check(arguments: &str) -> Option<String> {
@@ -1162,6 +1168,7 @@ async fn stream_response(
     Ok(())
 }
 
+#[derive(Debug, PartialEq)]
 enum LineToken {
     Text(String),
     Thinking(String),

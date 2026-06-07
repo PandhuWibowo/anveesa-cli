@@ -610,6 +610,22 @@ async fn ask_streaming(
     result
 }
 
+/// Export a conversation history as markdown to the given path.
+///
+/// # Examples
+///
+/// ```
+/// use anveesa::export_conversation;
+/// use anveesa::provider::{ChatMessage, ChatRole};
+/// use std::path::Path;
+///
+/// let history = vec![
+///     ChatMessage { role: ChatRole::User, content: "hello".into() },
+///     ChatMessage { role: ChatRole::Assistant, content: "hi".into() },
+/// ];
+/// let path = Path::new("/tmp/anveesa-export-test.md");
+/// export_conversation(path, &history).ok();
+/// ```
 pub fn export_conversation(path: &std::path::Path, history: &[ChatMessage]) -> Result<()> {
     let mut out = String::new();
     for msg in history {
@@ -734,6 +750,7 @@ fn one_shot_policy(auto_approve: bool, stdin_is_terminal: bool) -> ApprovalPolic
     }
 }
 
+/// Return the current Unix timestamp in seconds.
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

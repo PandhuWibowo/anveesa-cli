@@ -30,6 +30,19 @@ const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
 const MAX_COMMAND_TIMEOUT_SECS: u64 = 300;
 
 /// System guidance describing the available tools to the model.
+///
+/// # Examples
+///
+/// ```
+/// use anveesa::tools::guidance;
+///
+/// let g = guidance(false);
+/// assert!(g.contains("You can use Anveesa tools"));
+/// assert!(!g.contains("create_dir"));
+///
+/// let gw = guidance(true);
+/// assert!(gw.contains("create_dir"));
+/// ```
 pub fn guidance(include_write: bool) -> String {
     let mut text = String::from(
         "You can use Anveesa tools to inspect the workspace: list directories, find files by name, \
@@ -68,6 +81,17 @@ beyond this conversation — notes survive across sessions.",
 }
 
 /// Whether a tool modifies the system and must pass the approval policy.
+///
+/// # Examples
+///
+/// ```
+/// use anveesa::tools::is_write_tool;
+///
+/// assert!(is_write_tool("write_file"));
+/// assert!(is_write_tool("run_command"));
+/// assert!(!is_write_tool("read_file"));
+/// assert!(!is_write_tool("list_dir"));
+/// ```
 pub fn is_write_tool(name: &str) -> bool {
     matches!(
         name,
@@ -88,11 +112,32 @@ pub fn is_write_tool(name: &str) -> bool {
 }
 
 /// Whether a tool name belongs to an MCP server (prefix mcp__).
+///
+/// # Examples
+///
+/// ```
+/// use anveesa::tools::is_mcp_tool;
+///
+/// assert!(is_mcp_tool("mcp__server_name"));
+/// assert!(!is_mcp_tool("read_file"));
+/// ```
 pub fn is_mcp_tool(name: &str) -> bool {
     name.starts_with("mcp__")
 }
 
 /// A short, human-readable summary of a tool call for confirmation prompts.
+///
+/// # Examples
+///
+/// ```
+/// use anveesa::tools::describe_call;
+///
+/// let desc = describe_call("read_file", r#"{"path": "Cargo.toml"}"#);
+/// assert!(desc.contains("Cargo.toml"));
+///
+/// let desc = describe_call("git_status", "{}");
+/// assert_eq!(desc, "git status");
+/// ```
 pub fn describe_call(name: &str, arguments: &str) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     let field = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("");
@@ -170,6 +215,20 @@ impl EmptyStrExt for &str {
     }
 }
 
+/// Return function definitions for all available tools as JSON.
+///
+/// # Examples
+///
+/// ```
+/// use anveesa::tools::definitions;
+///
+/// let defs = definitions(false);
+/// assert!(!defs.is_empty());
+/// assert!(defs.iter().any(|d| d["function"]["name"] == "list_dir"));
+///
+/// let defs_write = definitions(true);
+/// assert!(defs_write.len() > defs.len());
+/// ```
 pub fn definitions(include_write: bool) -> Vec<Value> {
     let mut definitions = vec![
         json!({
@@ -623,6 +682,20 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
     definitions
 }
 
+/// Run a tool by name with the given JSON arguments.
+///
+/// Returns a JSON string result. Callers should check the `ok` field.
+///
+/// # Examples
+///
+/// ```no_run
+/// use anveesa::tools::run;
+/// use std::collections::HashMap;
+///
+/// // In an async context:
+/// // let result = run("nonexistent_tool", "{}").await;
+/// // assert!(result.contains("unknown tool"));
+/// ```
 pub async fn run(name: &str, arguments: &str) -> String {
     let result = match name {
         "list_dir" => list_dir(arguments).await,
