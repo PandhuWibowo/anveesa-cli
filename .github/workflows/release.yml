@@ -1,4 +1,4 @@
-name: Release Binaries
+name: Release
 
 on:
   push:
@@ -9,8 +9,11 @@ permissions:
   contents: write
 
 jobs:
+  # ── Build native binaries for all platforms ──────────────────────────────────
   build:
+    name: Build (${{ matrix.target }})
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -34,6 +37,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -48,21 +55,63 @@ jobs:
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          BIN_DIR=release-artifacts
-          mkdir -p $BIN_DIR
-          
+          mkdir -p dist
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp target/${{ matrix.target }}/release/anveesa.exe $BIN_DIR/anveesa.exe
-            cd $BIN_DIR && tar czf ../anveesa-$VERSION-${{ matrix.target }}.tar.gz anveesa.exe
+            cp target/${{ matrix.target }}/release/anveesa.exe dist/anveesa.exe
+            cd dist && tar czf ../anveesa-${VERSION}-${{ matrix.target }}.tar.gz anveesa.exe
           else
-            cp target/${{ matrix.target }}/release/anveesa $BIN_DIR/anveesa
-            chmod +x $BIN_DIR/anveesa
-            cd $BIN_DIR && tar czf ../anveesa-$VERSION-${{ matrix.target }}.tar.gz anveesa
+            cp target/${{ matrix.target }}/release/anveesa dist/anveesa
+            chmod +x dist/anveesa
+            cd dist && tar czf ../anveesa-${VERSION}-${{ matrix.target }}.tar.gz anveesa
           fi
 
-      - name: Upload to Release
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: anveesa-*.tar.gz
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Publish to npm (after all binaries are uploaded) ─────────────────────────
+  publish-npm:
+    name: Publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Sync version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          cd npm
+          node -e "
+            const pkg = require('./package.json');
+            pkg.version = '${VERSION}';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          cp ../README.md README.md
+
+      - name: Publish
+        run: cd npm && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ── Publish to crates.io ──────────────────────────────────────────────────────
+  publish-crates:
+    name: Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish
+        run: cargo publish --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

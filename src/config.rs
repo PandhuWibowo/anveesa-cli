@@ -473,6 +473,16 @@ pub struct OpenAiCompatibleProviderConfig {
     /// truncated by the output limit (Anveesa continues truncated answers either way).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+
+    /// Enable Anthropic extended thinking. Value = budget_tokens (e.g. 10000).
+    /// Requires a Claude 3.7+ model and the anthropic-beta header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended_thinking: Option<u32>,
+
+    /// Custom per-million-token pricing: [input, output, cache_read, cache_write].
+    /// Overrides the built-in model price table. Example: [3.0, 15.0, 0.3, 3.75]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -512,6 +522,8 @@ fn insert_openai_provider(
             headers: BTreeMap::new(),
             prompt_cache: None,
             max_tokens: None,
+            extended_thinking: None,
+            pricing: None,
         }),
     );
 }

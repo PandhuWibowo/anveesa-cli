@@ -971,43 +971,6 @@ fn scrape_ddg_lite(html: &str, max: usize) -> Vec<Value> {
     results
 }
 
-/// Scrape DuckDuckGo HTML search results page into structured results.
-fn scrape_ddg_html(html: &str, max: usize) -> Vec<Value> {
-    let mut results = Vec::new();
-    // DDG HTML results are in <div class="result"> blocks
-    // We extract title + snippet by simple string parsing
-    let mut pos = 0;
-    while results.len() < max {
-        // Find a result block
-        let Some(start) = html[pos..].find("class=\"result__a\"") else { break };
-        let block_start = pos + start;
-
-        // Extract href (URL)
-        let url = extract_attr(&html[block_start..block_start + 500], "href")
-            .map(|u| clean_ddg_url(u))
-            .unwrap_or_default();
-
-        // Extract link text (title)
-        let title = extract_tag_text(&html[block_start..block_start + 500], "a")
-            .unwrap_or_default();
-
-        // Find snippet nearby
-        let snippet_window = &html[block_start..std::cmp::min(block_start + 1000, html.len())];
-        let snippet = if let Some(s) = snippet_window.find("result__snippet") {
-            extract_tag_text(&snippet_window[s..std::cmp::min(s + 400, snippet_window.len())], "a")
-                .or_else(|| extract_tag_text(&snippet_window[s..std::cmp::min(s + 400, snippet_window.len())], "span"))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-
-        if !title.is_empty() && !url.is_empty() {
-            results.push(json!({ "title": title, "snippet": snippet, "url": url }));
-        }
-        pos = block_start + 10;
-    }
-    results
-}
 
 fn tag_attr(tag: &str, attr: &str) -> Option<String> {
     let dq = format!("{attr}=\"");

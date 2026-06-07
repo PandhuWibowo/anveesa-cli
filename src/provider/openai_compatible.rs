@@ -67,6 +67,8 @@ pub async fn ask(
     // Multi-model routing: use fast_model when only read-only tools have run
     let mut any_write_tool_used = false;
     let fast_model = config.fast_model.clone();
+    #[allow(unused_assignments)] // loop always overwrites before first read
+    let mut last_effective_model: Option<String> = None;
 
     loop {
         // Choose model: fast_model for read-only reasoning rounds, main model otherwise
@@ -75,6 +77,7 @@ pub async fn ask(
         } else {
             &model
         };
+        last_effective_model = Some(effective_model.to_string());
 
         let _ = events.send(StreamEvent::Status {
             message: if tool_rounds == 0 {
@@ -94,6 +97,13 @@ pub async fn ask(
         }
         if let Some(max_tokens) = config.max_tokens {
             body["max_tokens"] = json!(max_tokens);
+        }
+        if let Some(budget) = config.extended_thinking {
+            body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+            // Extended thinking requires max_tokens > budget_tokens
+            if config.max_tokens.is_none() {
+                body["max_tokens"] = json!(budget + 4096);
+            }
         }
         if tools_enabled {
             let mut defs = tools::definitions(policy.allows_write_tools());
@@ -240,6 +250,7 @@ pub async fn ask(
     Ok(TurnResult {
         text: full_text,
         usage: last_usage,
+        model_used: last_effective_model,
     })
 }
 
@@ -1010,6 +1021,17 @@ async fn send_with_retry(
                     backoff(attempt).await;
                     continue;
                 }
+                if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
+                    let wait = response.headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(5)
+                        .min(30);
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                    continue;
+                }
                 return Ok(response);
             }
             Err(error) => {
@@ -1049,8 +1071,10 @@ async fn stream_response(
 
                 while let Some(newline) = buffer.find('\n') {
                     let line: String = buffer.drain(..=newline).collect();
-                    if let Some(token) = state.ingest_line(line.trim_end_matches(['\r', '\n'])) {
-                        let _ = events.send(StreamEvent::Token(token));
+                    match state.ingest_line(line.trim_end_matches(['\r', '\n'])) {
+                        Some(LineToken::Text(t)) => { let _ = events.send(StreamEvent::Token(t)); }
+                        Some(LineToken::Thinking(t)) => { let _ = events.send(StreamEvent::Thinking(t)); }
+                        None => {}
                     }
                 }
             }
@@ -1074,13 +1098,20 @@ async fn stream_response(
     }
 
     // Process any remaining data in the buffer
-    if !buffer.is_empty()
-        && let Some(token) = state.ingest_line(buffer.trim())
-    {
-        let _ = events.send(StreamEvent::Token(token));
+    if !buffer.is_empty() {
+        match state.ingest_line(buffer.trim()) {
+            Some(LineToken::Text(t)) => { let _ = events.send(StreamEvent::Token(t)); }
+            Some(LineToken::Thinking(t)) => { let _ = events.send(StreamEvent::Thinking(t)); }
+            None => {}
+        }
     }
 
     Ok(())
+}
+
+enum LineToken {
+    Text(String),
+    Thinking(String),
 }
 
 #[derive(Debug, Default)]
@@ -1090,6 +1121,7 @@ struct StreamState {
     usage: Option<Usage>,
     finish_reason: Option<String>,
     done: bool,
+    thinking_buf: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1100,24 +1132,52 @@ struct PartialToolCall {
 }
 
 impl StreamState {
-    /// Process a single SSE line, returning any new assistant text to display.
-    fn ingest_line(&mut self, line: &str) -> Option<String> {
-        if self.done {
-            return None;
-        }
+    /// Process a single SSE line, returning any new token to display.
+    fn ingest_line(&mut self, line: &str) -> Option<LineToken> {
+        if self.done { return None; }
         let data = line.strip_prefix("data:")?.trim();
-        if data.is_empty() {
-            return None;
+        if data.is_empty() { return None; }
+        if data == "[DONE]" { self.done = true; return None; }
+        let chunk: Value = serde_json::from_str(data).ok()?;
+
+        // Anthropic native streaming: content_block_delta with thinking_delta / text_delta
+        if let Some(ev_type) = chunk.get("type").and_then(Value::as_str) {
+            match ev_type {
+                "content_block_delta" => {
+                    let delta = chunk.get("delta")?;
+                    match delta.get("type").and_then(Value::as_str) {
+                        Some("thinking_delta") => {
+                            let t = delta.get("thinking").and_then(Value::as_str).unwrap_or("");
+                            if !t.is_empty() {
+                                self.thinking_buf.push_str(t);
+                                return Some(LineToken::Thinking(t.to_string()));
+                            }
+                            return None;
+                        }
+                        Some("text_delta") => {
+                            let t = delta.get("text").and_then(Value::as_str).unwrap_or("");
+                            if !t.is_empty() {
+                                self.content.push_str(t);
+                                return Some(LineToken::Text(t.to_string()));
+                            }
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+                "message_delta" => {
+                    if let Some(usage) = chunk.get("usage") { self.usage = parse_usage(usage); }
+                    if let Some(r) = chunk.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                        self.finish_reason = Some(r.to_string());
+                    }
+                    return None;
+                }
+                "message_stop" => { self.done = true; return None; }
+                _ => {}
+            }
         }
-        if data == "[DONE]" {
-            self.done = true;
-            return None;
-        }
-        let chunk: Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => return None, // Skip malformed lines instead of bailing
-        };
-        self.apply_chunk(&chunk)
+
+        self.apply_chunk(&chunk).map(LineToken::Text)
     }
 
     fn apply_chunk(&mut self, chunk: &Value) -> Option<String> {
@@ -1283,11 +1343,31 @@ fn extract_api_error(body: &str) -> String {
         line
     };
 
-    if stripped.len() > 120 {
-        format!("{}…", &stripped[..120])
+    let msg = if stripped.len() > 200 {
+        format!("{}…", &stripped[..200])
     } else {
         stripped.to_string()
-    }
+    };
+
+    // Append an actionable hint for common errors
+    let e = msg.to_lowercase();
+    let hint = if e.contains("api key") || e.contains("invalid x-api-key") || e.contains("unauthenticated") || e.contains("unauthorized") {
+        Some("→ check API key in config (anveesa config init)")
+    } else if e.contains("rate limit") || e.contains("too many requests") || e.contains("quota exceeded") {
+        Some("→ rate limited; wait a moment or switch provider (/provider)")
+    } else if e.contains("insufficient credits") || e.contains("billing") {
+        Some("→ check account credits/billing at your provider")
+    } else if e.contains("context length") || e.contains("maximum context") || e.contains("too long") || e.contains("tokens") && e.contains("exceed") {
+        Some("→ context too long; try /compact to free space")
+    } else if e.contains("model") && (e.contains("not found") || e.contains("does not exist")) {
+        Some("→ unknown model; check /model name or run anveesa config init")
+    } else if e.contains("cannot enable streaming") || e.contains("stream") && e.contains("not support") {
+        Some("→ streaming not supported; remove stream_options from config")
+    } else {
+        None
+    };
+
+    if let Some(h) = hint { format!("{msg}  {h}") } else { msg }
 }
 
 #[cfg(test)]
@@ -1377,17 +1457,14 @@ mod tests {
     #[test]
     fn ingest_line_handles_sse_framing() {
         let mut state = StreamState::default();
-        assert_eq!(
+        assert!(matches!(
             state.ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"),
-            Some("hi".to_string())
-        );
-        assert_eq!(state.ingest_line(""), None);
-        assert_eq!(state.ingest_line("data: [DONE]"), None);
+            Some(LineToken::Text(t)) if t == "hi"
+        ));
+        assert!(state.ingest_line("").is_none());
+        assert!(state.ingest_line("data: [DONE]").is_none());
         assert!(state.done);
-        assert_eq!(
-            state.ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}"),
-            None
-        );
+        assert!(state.ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}").is_none());
     }
 
     #[test]

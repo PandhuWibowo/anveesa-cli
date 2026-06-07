@@ -118,6 +118,8 @@ pub enum StreamEvent {
     Status { message: String },
     /// A chunk of assistant text to display as it arrives.
     Token(String),
+    /// A chunk of extended thinking text (Anthropic thinking blocks).
+    Thinking(String),
     /// Final token accounting for the turn.
     Usage(Usage),
     /// A read-only tool is running. Used to make multi-round inspection visible.
@@ -167,6 +169,7 @@ pub struct DiffLine {
 #[derive(Debug, Clone, Default)]
 pub struct TurnResult {
     pub text: String,
+    pub model_used: Option<String>,
     pub usage: Option<Usage>,
 }
 

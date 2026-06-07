@@ -1,0 +1,26 @@
+{
+  "name": "anveesa",
+  "version": "0.7.0",
+  "description": "Multi-provider terminal AI assistant — TUI, web UI, and one-shot mode backed by any OpenAI-compatible API",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PandhuWibowo/anveesa-cli.git"
+  },
+  "homepage": "https://github.com/PandhuWibowo/anveesa-cli#readme",
+  "keywords": ["ai", "cli", "llm", "assistant", "tui", "openai", "anthropic", "deepseek", "groq"],
+  "bin": {
+    "anveesa": "./bin/anveesa"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md"
+  ]
+}

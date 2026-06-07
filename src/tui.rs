@@ -1,42 +1,50 @@
-use std::{path::PathBuf, time::{Duration, Instant}};
+mod commands;
+mod format;
+mod input;
+mod render;
+mod stream;
 
-use anyhow::{Context, Result};
+use std::{collections::BTreeSet, path::PathBuf, time::{Duration, Instant}};
+
+use anyhow::Result;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
     MouseEvent, MouseEventKind,
 };
-use ratatui::{
-    DefaultTerminal, Frame,
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
-};
+use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     cli::AskOptions,
     config::AppConfig,
     provider::{
-        ApprovalDecision, ApprovalPolicy, ChatMessage, ChatRole, ImageAttachment, PromptRequest,
-        StreamEvent, ToolConfirmPreview, Usage,
+        ApprovalDecision, ApprovalPolicy, ChatMessage, ChatRole, ImageAttachment, Usage,
     },
 };
+
+use self::format::{delete_word_before, move_cursor_left, move_cursor_right, next_char_len, prev_char_len};
+use self::render::{render, set_mouse_capture};
+use self::commands::handle_slash_command;
+use self::input::{tab_complete, update_search};
+use self::stream::{handle_stream_event, submit_prompt};
 
 // ── Public stream event type ──────────────────────────────────────────────────
 
 pub enum TuiEvent {
     Token(String),
+    Thinking(String),
     Status(String),
     ToolCall(String),
     ToolDone { summary: String, ok: bool },
-    // diff: Vec<(is_add, line)>
     FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)> },
     Confirm { summary: String, diff: Vec<(bool, String)>, reply: oneshot::Sender<ApprovalDecision> },
     Usage(Usage),
+    ModelUsed(String),
+    SystemMsg(String),
     Error(String),
     PlanSet(Vec<String>),
     PlanTaskDone(usize),
+    SetInput(String),
 }
 
 // ── Display message types ─────────────────────────────────────────────────────
@@ -47,6 +55,7 @@ enum Msg {
     Assistant { text: String },
     Tool { done: bool, ok: bool, text: String, elapsed_ms: Option<u128> },
     FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)>, collapsed: bool },
+    Thinking { text: String, collapsed: bool },
     Error(String),
     System(String),
     Separator, // thin line between turns — "AI is done, your turn"
@@ -72,28 +81,9 @@ enum Mode {
     Search,
 }
 
-// ── Application state ─────────────────────────────────────────────────────────
+// ── Focused sub-structs ───────────────────────────────────────────────────────
 
-pub struct App {
-    // conversation display
-    messages: Vec<Msg>,
-    streaming_buf: String,
-    accumulated_response: String,
-    pending_tool: Option<PendingTool>, // currently-running tool (not yet committed)
-    tool_status: String,
-    plan_tasks: Vec<String>,
-    plan_done: Vec<bool>,
-
-    // pending turn tracking
-    pending_prompt: String,
-    streaming_started_at: Option<Instant>,
-    tool_started_at: Option<Instant>,
-    unread_count: usize,
-    seen_paths: std::collections::BTreeSet<String>,
-    // undo stack: (path, old_content) — None content means file didn't exist before
-    undo_stack: Vec<(String, Option<String>)>,
-
-    // input
+struct InputState {
     input: String,
     input_cursor: usize,
     input_history: Vec<String>,
@@ -101,42 +91,60 @@ pub struct App {
     hist_saved: String,
     pending_images: Vec<ImageAttachment>,
     last_image_fp: Option<String>,
-    images_available: bool,
+    tab_state: Option<(String, Vec<String>, usize)>,
+}
 
-    // scroll
+struct StreamState {
+    streaming_buf: String,
+    accumulated_response: String,
+    pending_tool: Option<PendingTool>,
+    tool_status: String,
+    plan_tasks: Vec<String>,
+    plan_done: Vec<bool>,
+    pending_prompt: String,
+    streaming_started_at: Option<Instant>,
+    tool_started_at: Option<Instant>,
+    unread_count: usize,
+    thinking_buf: String,
+}
+
+pub(crate) struct ConvState {
+    history: Vec<ChatMessage>,
+    session_path: Option<PathBuf>,
+    pub last_saved_at: u64,
+    seen_paths: BTreeSet<String>,
+    undo_stack: Vec<(String, Option<String>)>,
+}
+
+struct ViewState {
+    messages: Vec<Msg>,
     scroll: usize,
     auto_scroll: bool,
     total_lines: usize,
-
-    // status info
-    provider: String,
-    model: String,
-    usage: Usage,
-    session_cost_usd: f64,
-    cwd: String,
-
-    // message navigation / collapsing
     msg_focus: Option<usize>,
     msg_line_offsets: Vec<usize>,
-
-    // conversation search
     search_query: String,
     search_results: Vec<usize>,
     search_idx: usize,
     search_scroll_saved: usize,
+    mouse_capture: bool,
+}
 
-    // tab completion state: (original input, candidates, current index)
-    tab_state: Option<(String, Vec<String>, usize)>,
+// ── Application state ─────────────────────────────────────────────────────────
 
+pub struct App {
     // mode
     mode: Mode,
     confirm: Option<PendingConfirm>,
-    mouse_capture: bool, // when false, terminal native text selection works
 
-    // history & session
-    history: Vec<ChatMessage>,
-    session_path: Option<PathBuf>,
-    pub last_saved_at: u64,
+    // status info
+    provider: String,
+    model: String,
+    last_model_used: Option<String>,
+    usage: Usage,
+    session_cost_usd: f64,
+    cwd: String,
+    images_available: bool,
 
     // request params
     pub config: AppConfig,
@@ -152,6 +160,12 @@ pub struct App {
 
     quit: bool,
     spinner_frame: usize,
+
+    // focused sub-structs
+    kbd: InputState,
+    live: StreamState,
+    pub(crate) conv: ConvState,
+    view: ViewState,
 }
 
 impl App {
@@ -181,55 +195,16 @@ impl App {
             .collect();
 
         Self {
-            messages,
-            streaming_buf: String::new(),
-            accumulated_response: String::new(),
-            pending_tool: None,
-            tool_status: String::new(),
-            plan_tasks: vec![],
-            plan_done: vec![],
-            pending_prompt: String::new(),
-            streaming_started_at: None,
-            tool_started_at: None,
-            unread_count: 0,
-            seen_paths: std::collections::BTreeSet::new(),
-            undo_stack: Vec::new(),
-
-            input: String::new(),
-            input_cursor: 0,
-            input_history,
-            hist_idx: None,
-            hist_saved: String::new(),
-            pending_images: Vec::new(),
-            last_image_fp: None,
-            images_available,
-
-            scroll: usize::MAX,
-            auto_scroll: true,
-            total_lines: 0,
+            mode: Mode::Input,
+            confirm: None,
 
             provider,
             model,
+            last_model_used: None,
             usage: Usage::default(),
             session_cost_usd: 0.0,
             cwd,
-
-            msg_focus: None,
-            msg_line_offsets: Vec::new(),
-            tab_state: None,
-
-            search_query: String::new(),
-            search_results: Vec::new(),
-            search_idx: 0,
-            search_scroll_saved: 0,
-
-            mode: Mode::Input,
-            confirm: None,
-            mouse_capture: true,
-
-            history,
-            session_path,
-            last_saved_at,
+            images_available,
 
             config,
             options,
@@ -243,6 +218,53 @@ impl App {
 
             quit: false,
             spinner_frame: 0,
+
+            kbd: InputState {
+                input: String::new(),
+                input_cursor: 0,
+                input_history,
+                hist_idx: None,
+                hist_saved: String::new(),
+                pending_images: Vec::new(),
+                last_image_fp: None,
+                tab_state: None,
+            },
+
+            live: StreamState {
+                streaming_buf: String::new(),
+                accumulated_response: String::new(),
+                pending_tool: None,
+                tool_status: String::new(),
+                plan_tasks: vec![],
+                plan_done: vec![],
+                pending_prompt: String::new(),
+                streaming_started_at: None,
+                tool_started_at: None,
+                unread_count: 0,
+                thinking_buf: String::new(),
+            },
+
+            conv: ConvState {
+                history,
+                session_path,
+                last_saved_at,
+                seen_paths: BTreeSet::new(),
+                undo_stack: Vec::new(),
+            },
+
+            view: ViewState {
+                messages,
+                scroll: usize::MAX,
+                auto_scroll: true,
+                total_lines: 0,
+                msg_focus: None,
+                msg_line_offsets: Vec::new(),
+                search_query: String::new(),
+                search_results: Vec::new(),
+                search_idx: 0,
+                search_scroll_saved: 0,
+                mouse_capture: true,
+            },
         }
     }
 }
@@ -258,49 +280,6 @@ pub async fn run(mut app: App) -> Result<Vec<ChatMessage>> {
     // Always release mouse capture on exit so the terminal works normally.
     crossterm::execute!(std::io::stdout(), DisableMouseCapture)?;
     result
-}
-
-fn set_mouse_capture(enabled: bool) {
-    if enabled {
-        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
-    } else {
-        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
-    }
-}
-
-
-fn write_to_clipboard(text: &str) -> bool {
-    // macOS
-    if cfg!(target_os = "macos") {
-        if let Ok(mut child) = std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn() {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    // Linux — try wl-copy (Wayland) then xclip (X11) then xsel
-    for cmd in &[
-        ("wl-copy", vec![]),
-        ("xclip", vec!["-selection", "clipboard"]),
-        ("xsel", vec!["--clipboard", "--input"]),
-    ] {
-        if let Ok(mut child) = std::process::Command::new(cmd.0)
-            .args(&cmd.1)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            if child.wait().map(|s| s.success()).unwrap_or(false) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec<ChatMessage>> {
@@ -323,7 +302,7 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec
             }
         }
     }
-    Ok(app.history.clone())
+    Ok(app.conv.history.clone())
 }
 
 // ── Event handling ────────────────────────────────────────────────────────────
@@ -337,18 +316,18 @@ async fn handle_event(app: &mut App, event: Event) -> Result<()> {
             if app.mode != Mode::Input { return Ok(()); }
             if text.trim().is_empty() {
                 if app.images_available {
-                    if let Some(img) = crate::grab_clipboard_image() {
-                        app.pending_images.push(img);
-                        app.last_image_fp = None;
+                    if let Some(img) = crate::image::grab_clipboard_image() {
+                        app.kbd.pending_images.push(img);
+                        app.kbd.last_image_fp = None;
                         return Ok(());
                     }
                 }
             } else {
                 let normalized = text.replace('\r', "\n");
-                app.input.insert_str(app.input_cursor, &normalized);
-                app.input_cursor += normalized.len();
-                app.hist_idx = None;
-                app.tab_state = None;
+                app.kbd.input.insert_str(app.kbd.input_cursor, &normalized);
+                app.kbd.input_cursor += normalized.len();
+                app.kbd.hist_idx = None;
+                app.kbd.tab_state = None;
             }
         }
         Event::Resize(_, _) => {}
@@ -360,14 +339,14 @@ async fn handle_event(app: &mut App, event: Event) -> Result<()> {
 fn handle_mouse(app: &mut App, kind: MouseEventKind) {
     match kind {
         MouseEventKind::ScrollUp => {
-            app.auto_scroll = false;
-            app.scroll = app.scroll.saturating_sub(3);
+            app.view.auto_scroll = false;
+            app.view.scroll = app.view.scroll.saturating_sub(3);
         }
         MouseEventKind::ScrollDown => {
-            app.scroll = app.scroll.saturating_add(3);
-            if app.scroll >= app.total_lines {
-                app.auto_scroll = true;
-                app.unread_count = 0;
+            app.view.scroll = app.view.scroll.saturating_add(3);
+            if app.view.scroll >= app.view.total_lines {
+                app.view.auto_scroll = true;
+                app.live.unread_count = 0;
             }
         }
         _ => {}
@@ -393,13 +372,13 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
     if app.mode == Mode::Streaming {
         match code {
             KeyCode::PageUp => {
-                app.auto_scroll = false;
-                app.scroll = app.scroll.saturating_sub(10);
+                app.view.auto_scroll = false;
+                app.view.scroll = app.view.scroll.saturating_sub(10);
             }
             KeyCode::PageDown => {
-                app.scroll = app.scroll.saturating_add(10);
-                if app.scroll >= app.total_lines {
-                    app.auto_scroll = true;
+                app.view.scroll = app.view.scroll.saturating_add(10);
+                if app.view.scroll >= app.view.total_lines {
+                    app.view.auto_scroll = true;
                 }
             }
             _ => {}
@@ -412,36 +391,36 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
         match code {
             KeyCode::Esc => {
                 app.mode = Mode::Input;
-                app.auto_scroll = false;
-                app.scroll = app.search_scroll_saved;
-                app.search_query.clear();
-                app.search_results.clear();
+                app.view.auto_scroll = false;
+                app.view.scroll = app.view.search_scroll_saved;
+                app.view.search_query.clear();
+                app.view.search_results.clear();
             }
             KeyCode::Enter | KeyCode::Down
             | KeyCode::Char('n') => {
-                if !app.search_results.is_empty() {
-                    app.search_idx = (app.search_idx + 1) % app.search_results.len();
-                    let idx = app.search_results[app.search_idx];
-                    if let Some(&off) = app.msg_line_offsets.get(idx) {
-                        app.scroll = off.saturating_sub(2);
+                if !app.view.search_results.is_empty() {
+                    app.view.search_idx = (app.view.search_idx + 1) % app.view.search_results.len();
+                    let idx = app.view.search_results[app.view.search_idx];
+                    if let Some(&off) = app.view.msg_line_offsets.get(idx) {
+                        app.view.scroll = off.saturating_sub(2);
                     }
                 }
             }
             KeyCode::Up | KeyCode::Char('p') => {
-                if !app.search_results.is_empty() {
-                    app.search_idx = app.search_idx.checked_sub(1).unwrap_or(app.search_results.len() - 1);
-                    let idx = app.search_results[app.search_idx];
-                    if let Some(&off) = app.msg_line_offsets.get(idx) {
-                        app.scroll = off.saturating_sub(2);
+                if !app.view.search_results.is_empty() {
+                    app.view.search_idx = app.view.search_idx.checked_sub(1).unwrap_or(app.view.search_results.len() - 1);
+                    let idx = app.view.search_results[app.view.search_idx];
+                    if let Some(&off) = app.view.msg_line_offsets.get(idx) {
+                        app.view.scroll = off.saturating_sub(2);
                     }
                 }
             }
             KeyCode::Backspace => {
-                app.search_query.pop();
+                app.view.search_query.pop();
                 update_search(app);
             }
             KeyCode::Char(c) => {
-                app.search_query.push(c);
+                app.view.search_query.push(c);
                 update_search(app);
             }
             _ => {}
@@ -453,54 +432,53 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
     match code {
         // Submit (Enter) or newline (Shift+Enter)
         KeyCode::Enter if modifiers.contains(KeyModifiers::SHIFT) => {
-            app.input.insert(app.input_cursor, '\n');
-            app.input_cursor += 1;
-            app.hist_idx = None;
+            app.kbd.input.insert(app.kbd.input_cursor, '\n');
+            app.kbd.input_cursor += 1;
+            app.kbd.hist_idx = None;
         }
         KeyCode::Tab => {
             tab_complete(app);
         }
 
-        KeyCode::Char('[') if app.input.is_empty() => {
-            let cur = app.msg_focus.unwrap_or(app.messages.len());
-            let prev = app.messages[..cur].iter().rposition(|m| matches!(m, Msg::FileOp { .. }));
+        KeyCode::Char('[') if app.kbd.input.is_empty() => {
+            let cur = app.view.msg_focus.unwrap_or(app.view.messages.len());
+            let prev = app.view.messages[..cur].iter().rposition(|m| matches!(m, Msg::FileOp { .. } | Msg::Thinking { .. }));
             if let Some(idx) = prev {
-                app.msg_focus = Some(idx);
-                app.auto_scroll = false;
-                if let Some(&off) = app.msg_line_offsets.get(idx) {
-                    app.scroll = off.saturating_sub(2);
-                }
+                app.view.msg_focus = Some(idx);
+                app.view.auto_scroll = false;
+                if let Some(&off) = app.view.msg_line_offsets.get(idx) { app.view.scroll = off.saturating_sub(2); }
             }
         }
-        KeyCode::Char(']') if app.input.is_empty() => {
-            let start = app.msg_focus.map(|i| i + 1).unwrap_or(0);
-            let next = app.messages[start..].iter().position(|m| matches!(m, Msg::FileOp { .. })).map(|i| start + i);
+        KeyCode::Char(']') if app.kbd.input.is_empty() => {
+            let start = app.view.msg_focus.map(|i| i + 1).unwrap_or(0);
+            let next = app.view.messages[start..].iter().position(|m| matches!(m, Msg::FileOp { .. } | Msg::Thinking { .. })).map(|i| start + i);
             if let Some(idx) = next {
-                app.msg_focus = Some(idx);
-                app.auto_scroll = false;
-                if let Some(&off) = app.msg_line_offsets.get(idx) {
-                    app.scroll = off.saturating_sub(2);
-                }
+                app.view.msg_focus = Some(idx);
+                app.view.auto_scroll = false;
+                if let Some(&off) = app.view.msg_line_offsets.get(idx) { app.view.scroll = off.saturating_sub(2); }
             }
         }
-        KeyCode::Esc if app.msg_focus.is_some() => {
-            app.msg_focus = None;
+        KeyCode::Esc if app.view.msg_focus.is_some() => {
+            app.view.msg_focus = None;
         }
 
         KeyCode::Enter => {
             // Toggle collapse on focused FileOp if one is selected
-            if let Some(idx) = app.msg_focus {
-                if let Some(Msg::FileOp { collapsed, .. }) = app.messages.get_mut(idx) {
-                    *collapsed = !*collapsed;
-                    return Ok(());
+            if let Some(idx) = app.view.msg_focus {
+                match app.view.messages.get_mut(idx) {
+                    Some(Msg::FileOp { collapsed, .. }) | Some(Msg::Thinking { collapsed, .. }) => {
+                        *collapsed = !*collapsed;
+                        return Ok(());
+                    }
+                    _ => {}
                 }
             }
-            let text = app.input.trim().to_string();
+            let text = app.kbd.input.trim().to_string();
             if text.is_empty() {
                 return Ok(());
             }
-            app.msg_focus = None;
-            app.tab_state = None;
+            app.view.msg_focus = None;
+            app.kbd.tab_state = None;
             if !handle_slash_command(app, &text) {
                 submit_prompt(app, text).await?;
             }
@@ -508,25 +486,25 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
 
         // Ctrl shortcuts
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.input.is_empty() {
+            if app.kbd.input.is_empty() {
                 app.quit = true;
             } else {
-                app.input.clear();
-                app.input_cursor = 0;
-                app.hist_idx = None;
+                app.kbd.input.clear();
+                app.kbd.input_cursor = 0;
+                app.kbd.hist_idx = None;
             }
         }
-        KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() => {
+        KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) && app.kbd.input.is_empty() => {
             app.quit = true;
         }
         KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input.drain(..app.input_cursor);
-            app.input_cursor = 0;
-            app.hist_idx = None;
+            app.kbd.input.drain(..app.kbd.input_cursor);
+            app.kbd.input_cursor = 0;
+            app.kbd.hist_idx = None;
         }
         KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
-            delete_word_before(&mut app.input, &mut app.input_cursor);
-            app.hist_idx = None;
+            delete_word_before(&mut app.kbd.input, &mut app.kbd.input_cursor);
+            app.kbd.hist_idx = None;
         }
         // Ctrl+V (all platforms) or Cmd+V (macOS) — image first, then text
         KeyCode::Char('v')
@@ -534,1489 +512,130 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
                 || (cfg!(target_os = "macos") && modifiers.contains(KeyModifiers::SUPER)) =>
         {
             if app.images_available {
-                if let Some(img) = crate::grab_clipboard_image() {
-                    app.pending_images.push(img);
-                    app.last_image_fp = None;
+                if let Some(img) = crate::image::grab_clipboard_image() {
+                    app.kbd.pending_images.push(img);
+                    app.kbd.last_image_fp = None;
                     return Ok(());
                 }
             }
-            if let Some(text) = crate::read_clipboard_text() {
+            if let Some(text) = crate::image::read_clipboard_text() {
                 if !text.is_empty() {
                     let normalized = text.replace('\r', "\n");
-                    app.input.insert_str(app.input_cursor, &normalized);
-                    app.input_cursor += normalized.len();
-                    app.hist_idx = None;
-                    app.tab_state = None;
+                    app.kbd.input.insert_str(app.kbd.input_cursor, &normalized);
+                    app.kbd.input_cursor += normalized.len();
+                    app.kbd.hist_idx = None;
+                    app.kbd.tab_state = None;
                 }
             }
         }
 
         // Ctrl+R — activate conversation search
         KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
-            app.search_scroll_saved = app.scroll;
-            app.search_query.clear();
-            app.search_results.clear();
-            app.search_idx = 0;
+            app.view.search_scroll_saved = app.view.scroll;
+            app.view.search_query.clear();
+            app.view.search_results.clear();
+            app.view.search_idx = 0;
             app.mode = Mode::Search;
         }
 
         // Ctrl+M — toggle mouse capture (scroll mode ↔ select mode)
         KeyCode::Char('m') if modifiers.contains(KeyModifiers::CONTROL) => {
-            app.mouse_capture = !app.mouse_capture;
-            set_mouse_capture(app.mouse_capture);
+            app.view.mouse_capture = !app.view.mouse_capture;
+            set_mouse_capture(app.view.mouse_capture);
         }
 
         // Editing
         KeyCode::Backspace => {
-            if app.input_cursor > 0 {
-                let len = prev_char_len(&app.input, app.input_cursor);
-                let start = app.input_cursor - len;
-                app.input.drain(start..app.input_cursor);
-                app.input_cursor = start;
-                app.hist_idx = None;
-                app.tab_state = None;
+            if app.kbd.input_cursor > 0 {
+                let len = prev_char_len(&app.kbd.input, app.kbd.input_cursor);
+                let start = app.kbd.input_cursor - len;
+                app.kbd.input.drain(start..app.kbd.input_cursor);
+                app.kbd.input_cursor = start;
+                app.kbd.hist_idx = None;
+                app.kbd.tab_state = None;
             }
         }
         KeyCode::Delete => {
-            if app.input_cursor < app.input.len() {
-                let len = next_char_len(&app.input, app.input_cursor);
-                app.input.drain(app.input_cursor..app.input_cursor + len);
-                app.hist_idx = None;
-                app.tab_state = None;
+            if app.kbd.input_cursor < app.kbd.input.len() {
+                let len = next_char_len(&app.kbd.input, app.kbd.input_cursor);
+                app.kbd.input.drain(app.kbd.input_cursor..app.kbd.input_cursor + len);
+                app.kbd.hist_idx = None;
+                app.kbd.tab_state = None;
             }
         }
 
         // Cursor movement
-        KeyCode::Left => move_cursor_left(&app.input.clone(), &mut app.input_cursor),
-        KeyCode::Right => move_cursor_right(&app.input.clone(), &mut app.input_cursor),
-        KeyCode::Home => app.input_cursor = 0,
-        KeyCode::End => app.input_cursor = app.input.len(),
+        KeyCode::Left => move_cursor_left(&app.kbd.input.clone(), &mut app.kbd.input_cursor),
+        KeyCode::Right => move_cursor_right(&app.kbd.input.clone(), &mut app.kbd.input_cursor),
+        KeyCode::Home => app.kbd.input_cursor = 0,
+        KeyCode::End => app.kbd.input_cursor = app.kbd.input.len(),
 
         // History navigation
         KeyCode::Up => {
-            if !app.input_history.is_empty() {
-                let new_idx = match app.hist_idx {
+            if !app.kbd.input_history.is_empty() {
+                let new_idx = match app.kbd.hist_idx {
                     None => {
-                        app.hist_saved = app.input.clone();
-                        app.input_history.len() - 1
+                        app.kbd.hist_saved = app.kbd.input.clone();
+                        app.kbd.input_history.len() - 1
                     }
                     Some(0) => 0,
                     Some(i) => i - 1,
                 };
-                app.hist_idx = Some(new_idx);
-                app.input = app.input_history[new_idx].clone();
-                app.input_cursor = app.input.len();
+                app.kbd.hist_idx = Some(new_idx);
+                app.kbd.input = app.kbd.input_history[new_idx].clone();
+                app.kbd.input_cursor = app.kbd.input.len();
             }
         }
         KeyCode::Down => {
-            match app.hist_idx {
+            match app.kbd.hist_idx {
                 None => {}
-                Some(i) if i + 1 >= app.input_history.len() => {
-                    app.hist_idx = None;
-                    app.input = std::mem::take(&mut app.hist_saved);
-                    app.input_cursor = app.input.len();
+                Some(i) if i + 1 >= app.kbd.input_history.len() => {
+                    app.kbd.hist_idx = None;
+                    app.kbd.input = std::mem::take(&mut app.kbd.hist_saved);
+                    app.kbd.input_cursor = app.kbd.input.len();
                 }
                 Some(i) => {
-                    app.hist_idx = Some(i + 1);
-                    app.input = app.input_history[i + 1].clone();
-                    app.input_cursor = app.input.len();
+                    app.kbd.hist_idx = Some(i + 1);
+                    app.kbd.input = app.kbd.input_history[i + 1].clone();
+                    app.kbd.input_cursor = app.kbd.input.len();
                 }
             }
         }
 
         // Scroll
         KeyCode::PageUp => {
-            app.auto_scroll = false;
-            app.scroll = app.scroll.saturating_sub(10);
+            app.view.auto_scroll = false;
+            app.view.scroll = app.view.scroll.saturating_sub(10);
         }
         KeyCode::PageDown => {
-            app.scroll = app.scroll.saturating_add(10);
-            if app.scroll >= app.total_lines {
-                app.auto_scroll = true;
+            app.view.scroll = app.view.scroll.saturating_add(10);
+            if app.view.scroll >= app.view.total_lines {
+                app.view.auto_scroll = true;
             }
         }
 
         // j/k vim-style scroll when input is empty
-        KeyCode::Char('j') if app.input.is_empty() => {
-            app.scroll = app.scroll.saturating_add(3);
-            if app.scroll >= app.total_lines { app.auto_scroll = true; app.unread_count = 0; }
-            else { app.auto_scroll = false; }
+        KeyCode::Char('j') if app.kbd.input.is_empty() => {
+            app.view.scroll = app.view.scroll.saturating_add(3);
+            if app.view.scroll >= app.view.total_lines { app.view.auto_scroll = true; app.live.unread_count = 0; }
+            else { app.view.auto_scroll = false; }
         }
-        KeyCode::Char('k') if app.input.is_empty() => {
-            app.auto_scroll = false;
-            app.scroll = app.scroll.saturating_sub(3);
+        KeyCode::Char('k') if app.kbd.input.is_empty() => {
+            app.view.auto_scroll = false;
+            app.view.scroll = app.view.scroll.saturating_sub(3);
         }
 
         // Printable characters
         KeyCode::Char(c) => {
             let s = c.to_string();
-            app.input.insert_str(app.input_cursor, &s);
-            app.input_cursor += s.len();
-            app.hist_idx = None;
-            app.msg_focus = None;
-            app.tab_state = None;
+            app.kbd.input.insert_str(app.kbd.input_cursor, &s);
+            app.kbd.input_cursor += s.len();
+            app.kbd.hist_idx = None;
+            app.view.msg_focus = None;
+            app.kbd.tab_state = None;
         }
 
         _ => {}
     }
     Ok(())
-}
-
-// Returns true if the command was consumed (don't send to AI).
-fn handle_slash_command(app: &mut App, text: &str) -> bool {
-    match text {
-        "/exit" | "/quit" | ":q" => {
-            app.quit = true;
-            true
-        }
-        "/clear" => {
-            app.messages.clear();
-            app.history.clear();
-            app.streaming_buf.clear();
-            app.accumulated_response.clear();
-            app.usage = Usage::default();
-            app.pending_images.clear();
-            app.seen_paths.clear();
-            app.undo_stack.clear();
-            app.input.clear();
-            app.input_cursor = 0;
-            if let Some(path) = &app.session_path {
-                let _ = std::fs::remove_file(path);
-            }
-            true
-        }
-        "/help" => {
-            app.messages.push(Msg::System(
-                "Commands:\n\
-                 /clear        reset conversation\n\
-                 /undo         restore last file changed by AI\n\
-                 /compact      drop old turns to free context\n\
-                 /copy         copy last response to clipboard\n\
-                 /export [path] save conversation as markdown\n\
-                 /model [name] · /provider [name] · /status · /exit\n\
-                 \n\
-                 Keys: ↑/↓ history  ←/→ cursor  Home/End  Shift+Enter newline\n\
-                 Tab     complete /command or file path (press again to cycle)\n\
-                 Ctrl+R  search conversation  (or /search)\n\
-                 [ ]     navigate between file diffs  Enter expand/collapse focused diff\n\
-                 j/k scroll (when input empty)  PageUp/Dn scroll\n\
-                 ⌘V (macOS) / Ctrl+V  paste image or text (repeat to queue multiple images)\n\
-                 Ctrl+W delete-word  Ctrl+U clear line\n\
-                 \n\
-                 Search: set BRAVE_SEARCH_API_KEY or SERPER_API_KEY for better results".into(),
-            ));
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        "/status" => {
-            let u = &app.usage;
-            app.messages.push(Msg::System(format!(
-                "provider: {}  model: {}  turns: {}  tokens: {}↓ {}↑ {} total",
-                app.provider,
-                app.model,
-                app.history.len() / 2,
-                u.prompt_tokens,
-                u.completion_tokens,
-                u.total_tokens,
-            )));
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        "/copy" => {
-            let last = app.messages.iter().rev().find_map(|m| {
-                if let Msg::Assistant { text } = m { Some(text.clone()) } else { None }
-            });
-            match last {
-                Some(text) => {
-                    if write_to_clipboard(&text) {
-                        app.messages.push(Msg::System("Last response copied to clipboard.".into()));
-                    } else {
-                        app.messages.push(Msg::Error("Could not write to clipboard (pbcopy/xclip/wl-copy not found).".into()));
-                    }
-                }
-                None => app.messages.push(Msg::System("No assistant response to copy yet.".into())),
-            }
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        "/undo" => {
-            match app.undo_stack.pop() {
-                None => app.messages.push(Msg::System("Nothing to undo.".into())),
-                Some((path, Some(old_content))) => {
-                    match std::fs::write(&path, &old_content) {
-                        Ok(()) => app.messages.push(Msg::System(format!("Restored {path}"))),
-                        Err(e) => app.messages.push(Msg::Error(format!("Undo failed: {e}"))),
-                    }
-                }
-                Some((path, None)) => {
-                    // File was newly created — delete it
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => app.messages.push(Msg::System(format!("Deleted {path} (undo create)"))),
-                        Err(e) => app.messages.push(Msg::Error(format!("Undo failed: {e}"))),
-                    }
-                }
-            }
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        "/compact" => {
-            let keep = 10usize;
-            let total_turns = app.history.len() / 2;
-            if total_turns <= keep {
-                app.messages.push(Msg::System(format!(
-                    "Conversation has {total_turns} turn(s) — nothing to compact yet (threshold: {keep})."
-                )));
-            } else {
-                let drop_turns = total_turns - keep;
-                let drop_msgs = drop_turns * 2;
-                // Summarise dropped content before removing it
-                let dropped_text: String = app.history[..drop_msgs].iter()
-                    .map(|m| m.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                // Extract file paths mentioned in dropped turns
-                let mut files: Vec<&str> = dropped_text.split_whitespace()
-                    .filter(|w| w.contains('/') || w.ends_with(".rs") || w.ends_with(".ts")
-                        || w.ends_with(".py") || w.ends_with(".js") || w.ends_with(".go"))
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-                files.sort();
-                files.truncate(12);
-                let file_hint = if files.is_empty() { String::new() }
-                    else { format!("  Files discussed: {}.", files.join(", ")) };
-                app.history.drain(..drop_msgs);
-                let msg_count = app.messages.len();
-                if msg_count > keep * 3 {
-                    app.messages.drain(..(msg_count - keep * 3));
-                }
-                app.seen_paths.clear();
-                // Inject a context breadcrumb so the model knows what was compacted
-                app.history.insert(0, ChatMessage::user(format!(
-                    "[Context note: {drop_turns} earlier turn(s) were compacted to save context.{file_hint} \
-                     Use read_file / list_dir to re-inspect any files if needed.]"
-                )));
-                app.messages.insert(0, Msg::System(format!(
-                    "Context compacted: dropped {drop_turns} older turn(s), keeping the last {keep}.{file_hint}"
-                )));
-                app.messages.push(Msg::Separator);
-            }
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        "/search" => {
-            app.search_scroll_saved = app.scroll;
-            app.search_query.clear();
-            app.search_results.clear();
-            app.search_idx = 0;
-            app.mode = Mode::Search;
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        s if s.starts_with("/export") => {
-            let arg = s.strip_prefix("/export").unwrap().trim();
-            let path = if arg.is_empty() {
-                std::path::PathBuf::from(format!("anveesa-export-{}.md", crate::unix_now()))
-            } else {
-                std::path::PathBuf::from(arg)
-            };
-            match crate::export_conversation(&path, &app.history) {
-                Ok(()) => app.messages.push(Msg::System(format!("Exported → {}", path.display()))),
-                Err(e) => app.messages.push(Msg::Error(format!("export failed: {e:#}"))),
-            }
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        s if s.starts_with("/model") => {
-            let arg = s.strip_prefix("/model").unwrap().trim();
-            if arg.is_empty() {
-                let current = app.model.clone();
-                app.messages.push(Msg::System(format!("current model: {current}")));
-            } else {
-                app.model = arg.to_string();
-                app.options.model = Some(arg.to_string());
-                app.messages.push(Msg::System(format!("switched to model: {arg}")));
-            }
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        s if s.starts_with("/provider") => {
-            let arg = s.strip_prefix("/provider").unwrap().trim();
-            if arg.is_empty() {
-                let current = app.provider.clone();
-                app.messages.push(Msg::System(format!("current provider: {current}")));
-            } else {
-                // Validate provider exists
-                if app.config.providers.contains_key(arg) {
-                    app.provider = arg.to_string();
-                    app.options.provider = Some(arg.to_string());
-                    // Update model to provider default
-                    if let Some(m) = app.config.providers.get(arg)
-                        .and_then(|p| p.default_model())
-                    {
-                        app.model = m.to_string();
-                        app.options.model = Some(m.to_string());
-                    }
-                    app.messages.push(Msg::System(format!("switched to provider: {arg}")));
-                } else {
-                    app.messages.push(Msg::Error(format!("unknown provider '{arg}'")));
-                }
-            }
-            app.input.clear();
-            app.input_cursor = 0;
-            true
-        }
-        _ => false,
-    }
-}
-
-// ── Conversation search ───────────────────────────────────────────────────────
-
-fn msg_text(msg: &Msg) -> Option<&str> {
-    match msg {
-        Msg::User { text } | Msg::Assistant { text } | Msg::Error(text) | Msg::System(text) => Some(text),
-        Msg::Tool { text, .. } => Some(text),
-        Msg::FileOp { path, .. } => Some(path),
-        Msg::Separator => None,
-    }
-}
-
-fn update_search(app: &mut App) {
-    let q = app.search_query.to_lowercase();
-    app.search_results = if q.is_empty() {
-        vec![]
-    } else {
-        app.messages.iter().enumerate()
-            .filter(|(_, m)| msg_text(m).map(|t| t.to_lowercase().contains(&q)).unwrap_or(false))
-            .map(|(i, _)| i)
-            .collect()
-    };
-    app.search_idx = 0;
-    if let Some(&first) = app.search_results.first() {
-        if let Some(&off) = app.msg_line_offsets.get(first) {
-            app.auto_scroll = false;
-            app.scroll = off.saturating_sub(2);
-        }
-    }
-}
-
-// ── Tab completion ────────────────────────────────────────────────────────────
-
-const SLASH_COMMANDS: &[&str] = &[
-    "/clear", "/compact", "/copy", "/exit", "/export",
-    "/help", "/model", "/provider", "/quit", "/search", "/status", "/undo",
-];
-
-fn tab_complete(app: &mut App) {
-    let input = app.input.clone();
-
-    // If we're still on the same completion cycle, advance the index
-    let continuing = app.tab_state.as_ref().map(|(_, cands, idx)| {
-        cands.get(*idx).map(|s| s == &input).unwrap_or(false)
-    }).unwrap_or(false);
-
-    if continuing {
-        if let Some((_, cands, idx)) = &mut app.tab_state {
-            *idx = (*idx + 1) % cands.len();
-            let next = cands[*idx].clone();
-            app.input = next;
-            app.input_cursor = app.input.len();
-        }
-        return;
-    }
-
-    let cands = compute_tab_completions(&input, &app.cwd);
-    if cands.is_empty() { return; }
-
-    app.input = cands[0].clone();
-    app.input_cursor = app.input.len();
-    app.tab_state = Some((input, cands, 0));
-}
-
-fn compute_tab_completions(input: &str, cwd: &str) -> Vec<String> {
-    // Slash command completion: /pro → /provider, /model, …
-    if input.starts_with('/') && !input.contains(' ') {
-        let matches: Vec<String> = SLASH_COMMANDS.iter()
-            .filter(|c| c.starts_with(input))
-            .map(|s| s.to_string())
-            .collect();
-        if !matches.is_empty() { return matches; }
-    }
-
-    // File path completion after "/export <path>"
-    if let Some(partial) = input.strip_prefix("/export ") {
-        let paths = tab_complete_path(partial, cwd);
-        return paths.into_iter().map(|p| format!("/export {p}")).collect();
-    }
-
-    vec![]
-}
-
-fn tab_complete_path(partial: &str, cwd: &str) -> Vec<String> {
-    let (dir_part, file_part) = if let Some(i) = partial.rfind('/') {
-        (&partial[..i + 1], &partial[i + 1..])
-    } else {
-        ("", partial)
-    };
-
-    let search_dir = if dir_part.is_empty() {
-        std::path::PathBuf::from(cwd)
-    } else if dir_part.starts_with('/') {
-        std::path::PathBuf::from(dir_part)
-    } else {
-        std::path::Path::new(cwd).join(dir_part)
-    };
-
-    let Ok(entries) = std::fs::read_dir(&search_dir) else { return vec![]; };
-    let mut out: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            if !name.starts_with(file_part) { return None; }
-            let trail = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) { "/" } else { "" };
-            Some(format!("{dir_part}{name}{trail}"))
-        })
-        .collect();
-    out.sort();
-    out
-}
-
-async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
-    // Save to input history
-    if app.input_history.last().map(|s| s.as_str()) != Some(&text) {
-        app.input_history.push(text.clone());
-    }
-    app.hist_idx = None;
-    app.pending_prompt = text.clone();
-    app.accumulated_response.clear();
-
-    // Collect explicitly pasted images; if none, auto-attach a new clipboard image once.
-    let images: Vec<crate::provider::ImageAttachment> = if !app.pending_images.is_empty() {
-        std::mem::take(&mut app.pending_images)
-    } else if app.images_available {
-        if let Some(img) = crate::grab_clipboard_image() {
-            let fp = crate::image_fingerprint(&img);
-            if app.last_image_fp.as_deref() == Some(&fp) {
-                vec![]
-            } else {
-                app.last_image_fp = Some(fp);
-                vec![img]
-            }
-        } else {
-            vec![]
-        }
-    } else {
-        vec![]
-    };
-
-    app.messages.push(Msg::User { text: text.clone() });
-    app.input.clear();
-    app.input_cursor = 0;
-    app.auto_scroll = true;
-    app.mode = Mode::Streaming;
-    app.tool_status = "Thinking".to_string();
-    app.spinner_frame = 0;
-
-    let provider_name = app
-        .config
-        .provider_name(app.options.provider.as_deref())
-        .context("unknown provider")?
-        .to_string();
-
-    let (stream_tx_inner, stream_rx_inner) = mpsc::unbounded_channel::<StreamEvent>();
-
-    // Clone everything needed for the spawned tasks
-    let config = app.config.clone();
-    let options = app.options.clone();
-    let history = app.history.clone();
-    // Augment workspace context with already-seen paths so the model doesn't re-scan them
-    let workspace_context = augmented_workspace_context(
-        app.workspace_context.as_deref(),
-        &app.seen_paths,
-    );
-    let policy = app.policy;
-    let mcp_arc = app.mcp.clone();
-    let tui_tx = app.stream_tx.clone();
-    let tui_tx2 = app.stream_tx.clone();
-
-    // Task 1: call the provider
-    tokio::spawn(async move {
-        let request = PromptRequest {
-            prompt: text,
-            model: options.model.clone(),
-            system: options.system.clone(),
-            workspace_context,
-            history,
-            images,
-            mcp: mcp_arc,
-        };
-        let result = crate::provider::ask(&config, &provider_name, request, policy, &stream_tx_inner).await;
-        drop(stream_tx_inner);
-        match result {
-            Ok(turn) => {
-                let _ = tui_tx.send(TuiEvent::Usage(turn.usage.unwrap_or_default()));
-            }
-            Err(e) => {
-                let _ = tui_tx.send(TuiEvent::Error(format!("{e:#}")));
-            }
-        }
-    });
-
-    // Task 2: relay StreamEvents → TuiEvents
-    tokio::spawn(async move {
-        let mut rx = stream_rx_inner;
-        while let Some(ev) = rx.recv().await {
-            let tui_ev = match ev {
-                StreamEvent::Token(t) => TuiEvent::Token(t),
-                StreamEvent::Status { message } => TuiEvent::Status(message),
-                StreamEvent::ToolCall { summary } => TuiEvent::ToolCall(summary),
-                StreamEvent::ToolResult { summary, ok, .. } => TuiEvent::ToolDone { summary, ok },
-                StreamEvent::FileOp { verb, path, added, removed, preview, .. } => {
-                    let diff = preview.into_iter().map(|dl| {
-                        let is_add = matches!(dl.kind, crate::provider::DiffKind::Add);
-                        (is_add, dl.text)
-                    }).collect();
-                    TuiEvent::FileOp { verb, path, added, removed, diff }
-                }
-                StreamEvent::Confirm { preview, reply } => {
-                    let (summary, diff) = match preview {
-                        ToolConfirmPreview::FileOp { verb, path, added, removed, diff, .. } => (
-                            format!("{verb} {path}  +{added} -{removed}"),
-                            diff.into_iter().map(|dl| (matches!(dl.kind, crate::provider::DiffKind::Add), dl.text)).collect(),
-                        ),
-                        ToolConfirmPreview::CreateDir { path } => (format!("mkdir {path}"), vec![]),
-                        ToolConfirmPreview::Generic { summary } => (summary, vec![]),
-                    };
-                    TuiEvent::Confirm { summary, diff, reply }
-                }
-                StreamEvent::Usage(u) => TuiEvent::Usage(u),
-                StreamEvent::PlanSet { tasks } => TuiEvent::PlanSet(tasks),
-                StreamEvent::PlanTaskDone { index } => TuiEvent::PlanTaskDone(index),
-            };
-            if tui_tx2.send(tui_ev).is_err() { break; }
-        }
-    });
-
-    Ok(())
-}
-
-async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
-    match ev {
-        TuiEvent::Token(text) => {
-            if app.streaming_started_at.is_none() {
-                app.streaming_started_at = Some(Instant::now());
-            }
-            app.streaming_buf.push_str(&text);
-            if app.auto_scroll {
-                app.scroll = usize::MAX;
-            } else {
-                app.unread_count += 1;
-            }
-        }
-        TuiEvent::Status(msg) => {
-            app.tool_status = msg;
-        }
-        TuiEvent::ToolCall(summary) => {
-            flush_streaming_buf(app);
-            commit_pending_tool(app, true);
-            app.pending_tool = Some(PendingTool { summary: summary.clone() });
-            app.tool_started_at = Some(Instant::now());
-            app.tool_status = summary;
-        }
-        TuiEvent::ToolDone { summary, ok } => {
-            let elapsed_ms = app.tool_started_at.take().map(|t| t.elapsed().as_millis());
-            // Record the inspected path so we can tell the model what it already knows
-            record_seen_path(&mut app.seen_paths, &summary);
-            app.pending_tool = Some(PendingTool { summary });
-            commit_pending_tool_timed(app, ok, elapsed_ms);
-            app.tool_status = "Thinking".to_string();
-        }
-        TuiEvent::FileOp { verb, path, added, removed, diff } => {
-            flush_streaming_buf(app);
-            commit_pending_tool(app, true);
-            let old_content = std::fs::read_to_string(&path).ok();
-            if app.undo_stack.len() >= 20 { app.undo_stack.remove(0); }
-            app.undo_stack.push((path.clone(), old_content));
-            let collapsed = diff.len() > 8;
-            app.messages.push(Msg::FileOp { verb, path, added, removed, diff, collapsed });
-        }
-        TuiEvent::Confirm { summary, diff, reply } => {
-            flush_streaming_buf(app);
-            commit_pending_tool(app, true);
-            app.confirm = Some(PendingConfirm { summary, diff, reply });
-            app.mode = Mode::Confirming;
-        }
-        TuiEvent::Usage(u) => {
-            app.usage.prompt_tokens += u.prompt_tokens;
-            app.usage.completion_tokens += u.completion_tokens;
-            app.usage.total_tokens += u.total_tokens;
-            app.usage.cache_read_tokens += u.cache_read_tokens;
-            app.usage.cache_write_tokens += u.cache_write_tokens;
-            let (in_price, out_price, cr_price, cw_price) = model_pricing(&app.model);
-            app.session_cost_usd += (u.prompt_tokens as f64 - u.cache_read_tokens as f64 - u.cache_write_tokens as f64).max(0.0) * in_price / 1_000_000.0
-                + u.completion_tokens as f64 * out_price / 1_000_000.0
-                + u.cache_read_tokens as f64 * cr_price / 1_000_000.0
-                + u.cache_write_tokens as f64 * cw_price / 1_000_000.0;
-            finish_turn(app);
-        }
-        TuiEvent::Error(msg) => {
-            flush_streaming_buf(app);
-            app.messages.push(Msg::Error(msg));
-            app.mode = Mode::Input;
-            app.tool_status.clear();
-        }
-        TuiEvent::PlanSet(tasks) => {
-            app.plan_done = vec![false; tasks.len()];
-            app.plan_tasks = tasks;
-        }
-        TuiEvent::PlanTaskDone(i) => {
-            if i < app.plan_done.len() { app.plan_done[i] = true; }
-        }
-    }
-}
-
-/// Extract a path from a tool call summary string and record it as "already seen".
-fn record_seen_path(seen: &mut std::collections::BTreeSet<String>, summary: &str) {
-    // Summaries look like "read file src/foo.ts" or "list directory src/bar"
-    // or "git status", "web search `...`" — only record file/dir paths
-    for prefix in &["read file ", "list directory "] {
-        if let Some(path) = summary.strip_prefix(prefix) {
-            let path = path.trim().to_string();
-            if !path.is_empty() {
-                seen.insert(path);
-            }
-            return;
-        }
-    }
-}
-
-/// Build an augmented workspace context that includes already-seen paths.
-fn augmented_workspace_context(
-    base: Option<&str>,
-    seen: &std::collections::BTreeSet<String>,
-) -> Option<String> {
-    if seen.is_empty() {
-        return base.map(str::to_string);
-    }
-    let seen_note = format!(
-        "\nAlready inspected this session (do NOT re-read these):\n{}",
-        seen.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n")
-    );
-    Some(match base {
-        Some(b) => format!("{b}{seen_note}"),
-        None => seen_note,
-    })
-}
-
-/// Flush streaming_buf to messages and accumulated_response.
-fn flush_streaming_buf(app: &mut App) {
-    if !app.streaming_buf.is_empty() {
-        let text = std::mem::take(&mut app.streaming_buf);
-        app.accumulated_response.push_str(&text);
-        app.messages.push(Msg::Assistant { text });
-    }
-}
-
-/// Commit a pending tool call to the message history with its final status.
-fn commit_pending_tool(app: &mut App, ok: bool) {
-    let elapsed = app.tool_started_at.take().map(|t| t.elapsed().as_millis());
-    commit_pending_tool_timed(app, ok, elapsed);
-}
-
-fn commit_pending_tool_timed(app: &mut App, ok: bool, elapsed_ms: Option<u128>) {
-    if let Some(tool) = app.pending_tool.take() {
-        app.messages.push(Msg::Tool { done: true, ok, text: tool.summary, elapsed_ms });
-    }
-}
-
-/// Commit the completed turn to history and save session.
-fn finish_turn(app: &mut App) {
-    commit_pending_tool(app, true);
-    flush_streaming_buf(app);
-    let response = std::mem::take(&mut app.accumulated_response);
-    if !response.is_empty() {
-        let prompt = std::mem::take(&mut app.pending_prompt);
-        app.history.push(ChatMessage::user(prompt));
-        app.history.push(ChatMessage::assistant(response));
-        if let Some(path) = &app.session_path {
-            if let Ok(cwd) = std::env::current_dir() {
-                let _ = crate::save_interactive_session_pub(
-                    path, &cwd, &app.provider, &app.options, &app.history,
-                );
-                app.last_saved_at = crate::unix_now();
-            }
-        }
-    }
-    if let Some(started) = app.streaming_started_at {
-        if started.elapsed() > Duration::from_secs(8) {
-            send_desktop_notification("anveesa", "Task complete");
-        }
-    }
-    app.mode = Mode::Input;
-    app.tool_status.clear();
-    app.streaming_started_at = None;
-    app.tool_started_at = None;
-    // Add a separator so the user sees clearly the AI is done
-    if !app.history.is_empty() {
-        app.messages.push(Msg::Separator);
-    }
-    // Auto-compact when history exceeds ~40K estimated tokens (1 char ≈ 0.25 tokens)
-    auto_compact_if_needed(app);
-}
-
-fn auto_compact_if_needed(app: &mut App) {
-    const TOKEN_THRESHOLD: usize = 40_000;
-    let estimated: usize = app.history.iter().map(|m| m.content.len() / 4).sum();
-    if estimated < TOKEN_THRESHOLD || app.history.len() < 8 {
-        return;
-    }
-    // Drop oldest quarter of turns (keep at least 4 turns)
-    let total_turns = app.history.len() / 2;
-    let drop_turns = (total_turns / 4).max(1).min(total_turns.saturating_sub(4));
-    let drop_msgs = drop_turns * 2;
-    app.history.drain(..drop_msgs);
-    app.seen_paths.clear();
-    app.messages.push(Msg::System(format!(
-        "Auto-compacted: dropped {drop_turns} older turn(s) (~{estimated}K est. tokens). Use /compact for manual control."
-    )));
-}
-
-// ── Rendering ─────────────────────────────────────────────────────────────────
-
-fn render(frame: &mut Frame, app: &mut App) {
-    let area = frame.area();
-    let input_lines = app.input.lines().count().max(1);
-    let input_height = (input_lines as u16).clamp(1, 5) + 2;
-
-    let status_height = if app.mode == Mode::Confirming {
-        let diff_rows = app.confirm.as_ref().map(|c| c.diff.len().min(20) as u16).unwrap_or(0);
-        1 + diff_rows
-    } else {
-        1
-    };
-
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(input_height),
-        Constraint::Length(status_height),
-    ])
-    .split(area);
-
-    render_header(frame, chunks[0], app);
-    render_messages(frame, chunks[1], app);
-    render_input(frame, chunks[2], app);
-    render_status(frame, chunks[3], app);
-}
-
-/// Returns (input_$/M, output_$/M, cache_read_$/M, cache_write_$/M).
-fn model_pricing(model: &str) -> (f64, f64, f64, f64) {
-    let m = model.to_lowercase();
-    if m.contains("claude") {
-        if m.contains("opus") {
-            (15.0, 75.0, 1.5, 18.75)
-        } else if m.contains("sonnet") {
-            (3.0, 15.0, 0.3, 3.75)
-        } else if m.contains("haiku") {
-            if m.contains("3-5") || m.contains("3.5") { (0.25, 1.25, 0.03, 0.30) }
-            else { (0.80, 4.0, 0.08, 1.0) }
-        } else {
-            (3.0, 15.0, 0.3, 3.75)
-        }
-    } else if m.contains("gpt-4o-mini") {
-        (0.15, 0.60, 0.075, 0.0)
-    } else if m.contains("gpt-4o") {
-        (2.50, 10.0, 1.25, 0.0)
-    } else if m.contains("gpt-4-turbo") || m.contains("gpt-4-1106") {
-        (10.0, 30.0, 0.0, 0.0)
-    } else if m.contains("gpt-3.5") {
-        (0.50, 1.50, 0.0, 0.0)
-    } else if m.contains("gemini-1.5-flash") {
-        (0.075, 0.30, 0.0, 0.0)
-    } else if m.contains("gemini") {
-        (1.25, 5.0, 0.0, 0.0)
-    } else {
-        (1.0, 3.0, 0.0, 0.0)
-    }
-}
-
-fn send_desktop_notification(title: &str, body: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let script = format!(
-            "display notification \"{}\" with title \"{}\"",
-            body.replace('"', "'"),
-            title.replace('"', "'")
-        );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("notify-send").args([title, body]).spawn();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    { let _ = (title, body); }
-}
-
-fn context_window_tokens(model: &str) -> usize {
-    let m = model.to_lowercase();
-    if m.contains("gemini") { 1_000_000 }
-    else if m.contains("claude") { 200_000 }
-    else if m.contains("gpt-4") { 128_000 }
-    else if m.contains("gpt-3.5") { 16_000 }
-    else if m.contains("qwen") || m.contains("deepseek") || m.contains("llama") { 128_000 }
-    else { 128_000 }
-}
-
-fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let version = env!("CARGO_PKG_VERSION");
-
-    // Token info
-    let token_str = if app.mode == Mode::Streaming && !app.streaming_buf.is_empty() {
-        let live = app.streaming_buf.len() / 4;
-        format!(" → {live}t")
-    } else if app.usage.total_tokens > 0 {
-        format!(" {}↓ {}↑", app.usage.prompt_tokens, app.usage.completion_tokens)
-    } else {
-        String::new()
-    };
-
-    // Context usage bar
-    let ctx_tokens: usize = app.history.iter().map(|m| m.content.len() / 4 + 4).sum::<usize>() + 2000;
-    let ctx_max = context_window_tokens(&app.model);
-    let pct = (ctx_tokens * 100 / ctx_max.max(1)).min(100);
-    let bar_len = 8usize;
-    let filled = (pct * bar_len / 100).min(bar_len);
-    let bar = format!("[{}{}] {}k", "█".repeat(filled), "░".repeat(bar_len - filled), ctx_tokens / 1000);
-    let bar_color = if pct > 80 { Color::Rgb(224, 108, 117) }
-        else if pct > 50 { Color::Rgb(229, 192, 123) }
-        else { Color::Rgb(152, 195, 121) };
-
-    let cost_str = if app.session_cost_usd > 0.0 {
-        if app.session_cost_usd < 0.001 {
-            " <$0.001".to_string()
-        } else if app.session_cost_usd < 1.0 {
-            format!(" ~${:.3}", app.session_cost_usd)
-        } else {
-            format!(" ~${:.2}", app.session_cost_usd)
-        }
-    } else {
-        String::new()
-    };
-
-    let left = format!(" anveesa v{version}{token_str}{cost_str}");
-    let mid = format!("  {bar}  ");
-    let right = format!(" {} · {} ", app.provider, app.model);
-    let gap = (area.width as usize)
-        .saturating_sub(left.chars().count() + mid.chars().count() + right.chars().count());
-
-    let line = ratatui::text::Line::from(vec![
-        Span::styled(left, Style::default().fg(Color::Rgb(20, 20, 30))),
-        Span::styled(mid, Style::default().fg(bar_color)),
-        Span::styled(" ".repeat(gap), Style::default()),
-        Span::styled(right, Style::default().fg(Color::Rgb(20, 20, 30))),
-    ]);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Color::Rgb(97, 175, 239))),
-        area,
-    );
-}
-
-fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
-    let width = area.width.saturating_sub(4) as usize;
-    let mut lines: Vec<Line<'static>> = vec![Line::from("")];
-    let mut msg_offsets: Vec<usize> = Vec::with_capacity(app.messages.len());
-
-    for (msg_idx, msg) in app.messages.iter().enumerate() {
-        msg_offsets.push(lines.len());
-        let focused = app.msg_focus == Some(msg_idx);
-        let _ = focused; // used below in FileOp branch
-        match msg {
-            Msg::User { text } => {
-                lines.push(user_header());
-                for l in wrap_text(text, width) {
-                    lines.push(Line::from(format!("    {l}")));
-                }
-                lines.push(Line::from(""));
-            }
-            Msg::Assistant { text } => {
-                lines.push(assistant_header(&app.model));
-                for l in format_assistant_lines(text, width) {
-                    lines.push(l);
-                }
-                lines.push(Line::from(""));
-            }
-            Msg::Tool { done, ok, text, elapsed_ms } => {
-                let (icon, color) = if !done {
-                    ("⠋", Color::DarkGray)
-                } else if *ok {
-                    ("✓", Color::Rgb(152, 195, 121))
-                } else {
-                    ("✗", Color::Rgb(224, 108, 117))
-                };
-                let elapsed_str = match elapsed_ms {
-                    Some(ms) if *ms < 1000 => format!("  {ms}ms"),
-                    Some(ms) => format!("  {:.1}s", *ms as f64 / 1000.0),
-                    None => String::new(),
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {icon} {text}"), Style::default().fg(color)),
-                    Span::styled(elapsed_str, Style::default().fg(Color::Rgb(80, 80, 100))),
-                ]));
-                lines.push(Line::from(""));
-            }
-            Msg::FileOp { verb, path, added, removed, diff, collapsed } => {
-                let focus_icon = if focused { "►" } else { " " };
-                let header_bg = if focused { Color::Rgb(25, 25, 50) } else { Color::Reset };
-                let toggle_hint = if *collapsed {
-                    format!("  [▶ {} lines]", diff.len())
-                } else if diff.len() > 8 {
-                    "  [▼ collapse]".to_string()
-                } else {
-                    String::new()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!(" {focus_icon}📄 "), Style::default().fg(Color::Rgb(229, 192, 123)).bg(header_bg)),
-                    Span::styled(format!("{verb} "), Style::default().fg(Color::White).bg(header_bg)),
-                    Span::styled(path.clone(), Style::default().fg(Color::Rgb(97, 175, 239)).bg(header_bg)),
-                    Span::styled(format!("  +{added}"), Style::default().fg(Color::Rgb(152, 195, 121)).bg(header_bg)),
-                    Span::styled(format!(" -{removed}"), Style::default().fg(Color::Rgb(224, 108, 117)).bg(header_bg)),
-                    Span::styled(toggle_hint, Style::default().fg(Color::Rgb(80, 80, 100)).bg(header_bg)),
-                ]));
-                if !collapsed {
-                    for (is_add, line) in diff.iter().take(40) {
-                        let (prefix, color) = if *is_add {
-                            ("  + ", Color::Rgb(152, 195, 121))
-                        } else {
-                            ("  - ", Color::Rgb(224, 108, 117))
-                        };
-                        let bg = if *is_add { Color::Rgb(20, 35, 20) } else { Color::Rgb(35, 20, 20) };
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}{}", &line.trim_end().chars().take(width.saturating_sub(6)).collect::<String>()),
-                            Style::default().fg(color).bg(bg),
-                        )));
-                    }
-                    if diff.len() > 40 {
-                        lines.push(Line::from(Span::styled(
-                            format!("  … {} more lines", diff.len() - 40),
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                    }
-                }
-                lines.push(Line::from(""));
-            }
-            Msg::Error(msg) => {
-                lines.push(Line::from(Span::styled(
-                    format!("  ✗ {msg}"),
-                    Style::default().fg(Color::Rgb(224, 108, 117)),
-                )));
-                lines.push(Line::from(""));
-            }
-            Msg::System(msg) => {
-                for l in msg.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  · {l}"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-                lines.push(Line::from(""));
-            }
-            Msg::Separator => {
-                // Thin line between turns — signals "AI is done, your turn"
-                let line_width = width.saturating_sub(2);
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", "─".repeat(line_width.min(60))),
-                    Style::default().fg(Color::Rgb(45, 45, 65)),
-                )));
-                lines.push(Line::from(""));
-            }
-        }
-    }
-
-    app.msg_line_offsets = msg_offsets;
-
-    // Live pending tool (running, not yet committed) — animated with elapsed time
-    if let Some(tool) = &app.pending_tool {
-        let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let dot = dots[app.spinner_frame % dots.len()];
-        let elapsed = app.tool_started_at
-            .map(|t| t.elapsed().as_secs_f32())
-            .unwrap_or(0.0);
-        let elapsed_str = if elapsed < 0.5 { String::new() } else { format!(" ({:.1}s)", elapsed) };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {dot} {}{}", tool.summary, elapsed_str),
-                Style::default().fg(Color::Rgb(180, 140, 60)),
-            ),
-        ]));
-        lines.push(Line::from(""));
-    }
-
-    // In-progress streaming — assistant message being built token by token
-    if !app.streaming_buf.is_empty() || (app.mode == Mode::Streaming && app.pending_tool.is_none()) {
-        lines.push(assistant_header(&app.model));
-        if !app.streaming_buf.is_empty() {
-            for l in format_assistant_lines(&app.streaming_buf, width) {
-                lines.push(l);
-            }
-        } else {
-            let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let dot = dots[app.spinner_frame % dots.len()];
-            let elapsed = app.streaming_started_at
-                .map(|t| t.elapsed().as_secs_f32())
-                .unwrap_or(0.0);
-            let elapsed_str = if elapsed < 0.5 { String::new() } else { format!(" ({:.1}s)", elapsed) };
-            let status = if app.tool_status.is_empty() { "Thinking" } else { app.tool_status.as_str() };
-            lines.push(Line::from(Span::styled(
-                format!("    {dot} {status}{elapsed_str}"),
-                Style::default().fg(Color::Rgb(180, 140, 60)),
-            )));
-        }
-        lines.push(Line::from(""));
-    }
-
-    // Add bottom padding so wrapped last lines are never cut off by viewport
-    for _ in 0..3 { lines.push(Line::from("")); }
-
-    // Estimate visual rows (accounting for line wrapping) for accurate auto-scroll
-    let visual_rows: usize = if width == 0 { lines.len() } else {
-        lines.iter().map(|l| {
-            let chars: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
-            if chars == 0 { 1 } else { chars.div_ceil(width) }
-        }).sum()
-    };
-
-    let total = lines.len();
-    app.total_lines = total;
-    let visible = area.height as usize;
-    let scroll = if app.auto_scroll || app.scroll == usize::MAX {
-        // Use visual-row estimate to scroll accurately to the bottom
-        visual_rows.saturating_sub(visible)
-    } else {
-        app.scroll.min(total.saturating_sub(1))
-    };
-    app.scroll = scroll;
-
-    // "↓ unread" badge overlay when scrolled away
-    let mut widget_lines = lines;
-    if !app.auto_scroll && app.unread_count > 0 {
-        let badge = format!(" ↓ {} new ", app.unread_count);
-        widget_lines.push(Line::from(Span::styled(
-            badge,
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(97, 175, 239))
-                .add_modifier(Modifier::BOLD),
-        )));
-    }
-
-    frame.render_widget(
-        Paragraph::new(widget_lines).scroll((scroll as u16, 0)),
-        area,
-    );
-}
-
-fn user_header() -> Line<'static> {
-    Line::from(Span::styled(
-        "  ● You",
-        Style::default().fg(Color::Rgb(97, 175, 239)).add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn assistant_header(model: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("  ● {model}"),
-        Style::default().fg(Color::Rgb(152, 195, 121)).add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    // Border color reflects mode: ready=green, streaming=yellow, confirming=orange
-    let border_color = match app.mode {
-        Mode::Input | Mode::Search => Color::Rgb(152, 195, 121), // green — "your turn"
-        Mode::Streaming => Color::Rgb(229, 192, 123), // yellow — "thinking"
-        Mode::Confirming => Color::Rgb(224, 108, 117), // red — "needs decision"
-    };
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(border_color));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if app.mode != Mode::Input && app.mode != Mode::Search {
-        // Don't show cursor or text while AI is working
-        return;
-    }
-
-    if app.input.is_empty() && app.pending_images.is_empty() {
-        frame.render_widget(
-            Paragraph::new("  ❯ Ask anything…  (↑/↓ history · ⌘V paste image)")
-                .style(Style::default().fg(Color::Rgb(60, 60, 80))),
-            inner,
-        );
-        frame.set_cursor_position((inner.x + 4, inner.y));
-        return;
-    }
-
-    let label = match app.pending_images.len() {
-        0 => "  ❯ ".to_string(),
-        1 => "  [📎] ❯ ".to_string(),
-        n => format!("  [📎 ×{n}] ❯ "),
-    };
-    let label_w = label.chars().count();
-    let display = format!("{label}{}", app.input);
-
-    frame.render_widget(
-        Paragraph::new(display).style(Style::default().fg(Color::White)).wrap(Wrap { trim: false }),
-        inner,
-    );
-
-    let cursor_chars = label_w + app.input[..app.input_cursor].chars().count();
-    let w = inner.width.max(1) as usize;
-    frame.set_cursor_position((
-        inner.x + (cursor_chars % w) as u16,
-        inner.y + (cursor_chars / w) as u16,
-    ));
-}
-
-fn render_status(frame: &mut Frame, area: Rect, app: &App) {
-    match app.mode {
-        Mode::Confirming => {
-            let summary = app.confirm.as_ref().map(|c| c.summary.clone()).unwrap_or_default();
-            let diff = app.confirm.as_ref().map(|c| c.diff.clone()).unwrap_or_default();
-            let w = area.width as usize;
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            for (is_add, line_text) in diff.iter().take(20) {
-                let (prefix, fg, bg) = if *is_add {
-                    ("+ ", Color::Rgb(152, 195, 121), Color::Rgb(20, 35, 20))
-                } else {
-                    ("- ", Color::Rgb(224, 108, 117), Color::Rgb(35, 20, 20))
-                };
-                let truncated: String = line_text.trim_end().chars().take(w.saturating_sub(3)).collect();
-                lines.push(Line::from(Span::styled(
-                    format!(" {prefix}{truncated}"),
-                    Style::default().fg(fg).bg(bg),
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                format!(" ⚠  {summary}   [y] allow once   [a] allow all   [n] deny "),
-                Style::default().fg(Color::Black).bg(Color::Rgb(224, 108, 117)),
-            )));
-            frame.render_widget(Paragraph::new(lines), area);
-        }
-        Mode::Streaming => {
-            let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let dot = dots[app.spinner_frame % dots.len()];
-            let elapsed = app.streaming_started_at
-                .map(|t| t.elapsed().as_secs_f32())
-                .unwrap_or(0.0);
-            let state = if !app.tool_status.is_empty() {
-                format!("{dot} {}  ({:.1}s)", app.tool_status, elapsed)
-            } else {
-                format!("{dot} Thinking…  ({:.1}s)", elapsed)
-            };
-            let left = format!(" {state}");
-            let right = format!(" {}  Ctrl+C cancel ", app.cwd);
-            let gap = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
-            let text = format!("{left}{}{right}", " ".repeat(gap));
-            frame.render_widget(
-                Paragraph::new(text)
-                    .style(Style::default().fg(Color::Rgb(229, 192, 123)).bg(Color::Rgb(30, 28, 20))),
-                area,
-            );
-        }
-        Mode::Search => {
-            let n = app.search_results.len();
-            let pos = if n == 0 { String::new() } else { format!("  {}/{n}", app.search_idx + 1) };
-            let left = format!(" 🔍 {}{pos}", app.search_query);
-            let right = " ↑↓ navigate  Esc close ";
-            let gap = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
-            let text = format!("{left}{}{right}", " ".repeat(gap));
-            frame.render_widget(
-                Paragraph::new(text)
-                    .style(Style::default().fg(Color::White).bg(Color::Rgb(30, 20, 50))),
-                area,
-            );
-        }
-        Mode::Input => {
-            let mode_icon = if app.mouse_capture { "⊙" } else { "⊕" };
-            let mode_label = if app.mouse_capture { "scroll" } else { "select" };
-            let left = format!(" ● Ready  {}", app.cwd);
-            let right = format!(" {mode_icon} {mode_label}  /help ");
-            let gap = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
-            let text = format!("{left}{}{right}", " ".repeat(gap));
-            frame.render_widget(
-                Paragraph::new(text)
-                    .style(Style::default().fg(Color::Rgb(152, 195, 121)).bg(Color::Rgb(20, 30, 20))),
-                area,
-            );
-        }
-    }
-}
-
-// ── Text formatting ───────────────────────────────────────────────────────────
-
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 { return vec![text.to_string()]; }
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() { out.push(String::new()); continue; }
-        let mut current = String::new();
-        let mut col = 0usize;
-        for word in line.split_whitespace() {
-            let wlen = word.chars().count();
-            if col > 0 && col + 1 + wlen > width {
-                out.push(current.clone());
-                current.clear();
-                col = 0;
-            }
-            if col > 0 { current.push(' '); col += 1; }
-            current.push_str(word);
-            col += wlen;
-        }
-        out.push(current);
-    }
-    out
-}
-
-fn format_assistant_lines(text: &str, width: usize) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let mut in_code = false;
-    let mut code_lang = String::new();
-
-    for raw in text.lines() {
-        if raw.starts_with("```") {
-            if in_code {
-                in_code = false;
-                code_lang.clear();
-                out.push(Line::from(Span::styled(
-                    "    └──────────────────────".to_string(),
-                    Style::default().fg(Color::Rgb(50, 50, 70)),
-                )));
-            } else {
-                in_code = true;
-                code_lang = raw[3..].trim().to_string();
-                let lang = if code_lang.is_empty() { String::new() } else { format!(" {} ", code_lang) };
-                out.push(Line::from(Span::styled(
-                    format!("    ┌─{lang}"),
-                    Style::default().fg(Color::Rgb(50, 50, 70)),
-                )));
-            }
-            continue;
-        }
-
-        if in_code {
-            out.push(highlight_code_line(raw, &code_lang));
-        } else {
-            let wrapped = if width > 4 && raw.chars().count() + 4 > width {
-                wrap_text(raw, width.saturating_sub(4))
-            } else {
-                vec![raw.to_string()]
-            };
-            for l in wrapped {
-                out.push(format_prose_line(&l));
-            }
-        }
-    }
-    out
-}
-
-fn format_prose_line(line: &str) -> Line<'static> {
-    if line.is_empty() { return Line::from(""); }
-
-    if line.starts_with("### ") {
-        return Line::from(Span::styled(
-            format!("    {}", &line[4..]),
-            Style::default().fg(Color::Rgb(198, 160, 246)).add_modifier(Modifier::BOLD),
-        ));
-    }
-    if line.starts_with("## ") {
-        return Line::from(Span::styled(
-            format!("    {}", &line[3..]),
-            Style::default().fg(Color::Rgb(198, 160, 246)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ));
-    }
-    if line.starts_with("# ") {
-        return Line::from(Span::styled(
-            format!("    {}", &line[2..]),
-            Style::default().fg(Color::Rgb(198, 160, 246)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ));
-    }
-
-    let (prefix, rest) = if let Some(s) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-        ("    • ", s)
-    } else {
-        ("    ", line)
-    };
-
-    Line::from(parse_inline(&format!("{prefix}{rest}")))
-}
-
-fn parse_inline(text: &str) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut chars = text.chars().peekable();
-    let mut buf = String::new();
-
-    while let Some(c) = chars.next() {
-        if c == '`' {
-            if !buf.is_empty() { spans.push(Span::raw(buf.clone())); buf.clear(); }
-            let mut code = String::new();
-            for ch in chars.by_ref() { if ch == '`' { break; } code.push(ch); }
-            spans.push(Span::styled(code, Style::default().fg(Color::Rgb(229, 192, 123)).bg(Color::Rgb(40, 40, 55))));
-        } else if c == '*' && chars.peek() == Some(&'*') {
-            chars.next();
-            if !buf.is_empty() { spans.push(Span::raw(buf.clone())); buf.clear(); }
-            let mut bold = String::new();
-            loop {
-                match chars.next() {
-                    Some('*') if chars.peek() == Some(&'*') => { chars.next(); break; }
-                    Some(ch) => bold.push(ch),
-                    None => break,
-                }
-            }
-            spans.push(Span::styled(bold, Style::default().add_modifier(Modifier::BOLD)));
-        } else if c == '*' {
-            if !buf.is_empty() { spans.push(Span::raw(buf.clone())); buf.clear(); }
-            let mut italic = String::new();
-            for ch in chars.by_ref() { if ch == '*' { break; } italic.push(ch); }
-            spans.push(Span::styled(italic, Style::default().add_modifier(Modifier::ITALIC)));
-        } else {
-            buf.push(c);
-        }
-    }
-    if !buf.is_empty() { spans.push(Span::raw(buf)); }
-    spans
-}
-
-fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
-    static KEYWORDS: &[&str] = &[
-        "fn", "let", "mut", "const", "struct", "enum", "impl", "trait", "use", "pub",
-        "mod", "return", "if", "else", "for", "while", "loop", "match", "async", "await",
-        "self", "Self", "true", "false", "Some", "None", "Ok", "Err", "type", "where",
-        "def", "class", "import", "from", "pass", "with", "as", "in", "not", "and", "or",
-        "var", "function", "new", "this", "typeof", "instanceof", "yield", "break", "continue",
-        "int", "str", "bool", "float", "None", "True", "False", "null", "undefined",
-        "interface", "extends", "implements", "static", "final", "void", "package",
-    ];
-
-    let bg = Color::Rgb(28, 28, 40);
-    let mut spans: Vec<Span<'static>> = vec![
-        Span::styled("      ".to_string(), Style::default().bg(bg)),
-    ];
-
-    let mut chars = line.chars().peekable();
-    let mut buf = String::new();
-    let mut in_string = false;
-    let mut string_char = '"';
-
-    let flush = |buf: &mut String, spans: &mut Vec<Span<'static>>| {
-        if buf.is_empty() { return; }
-        let s = buf.clone();
-        let style = if KEYWORDS.contains(&s.as_str()) {
-            Style::default().fg(Color::Rgb(198, 120, 221)).bg(bg)
-        } else {
-            Style::default().fg(Color::Rgb(171, 178, 191)).bg(bg)
-        };
-        spans.push(Span::styled(s, style));
-        buf.clear();
-    };
-
-    while let Some(c) = chars.next() {
-        if in_string {
-            buf.push(c);
-            if c == string_char {
-                let s = buf.clone();
-                spans.push(Span::styled(s, Style::default().fg(Color::Rgb(152, 195, 121)).bg(bg)));
-                buf.clear();
-                in_string = false;
-            }
-            continue;
-        }
-
-        // Line comments
-        if (c == '/' && chars.peek() == Some(&'/')) || c == '#' {
-            flush(&mut buf, &mut spans);
-            let rest: String = std::iter::once(c).chain(chars.by_ref()).collect();
-            spans.push(Span::styled(rest, Style::default().fg(Color::Rgb(92, 99, 112)).bg(bg)));
-            break;
-        }
-
-        // String start
-        if c == '"' || c == '\'' {
-            flush(&mut buf, &mut spans);
-            in_string = true;
-            string_char = c;
-            buf.push(c);
-            continue;
-        }
-
-        // Numbers
-        if c.is_ascii_digit() && buf.is_empty() {
-            flush(&mut buf, &mut spans);
-            let mut num = c.to_string();
-            while let Some(&n) = chars.peek() {
-                if n.is_ascii_alphanumeric() || n == '.' || n == '_' { num.push(n); chars.next(); }
-                else { break; }
-            }
-            spans.push(Span::styled(num, Style::default().fg(Color::Rgb(209, 154, 102)).bg(bg)));
-            continue;
-        }
-
-        if c.is_alphanumeric() || c == '_' {
-            buf.push(c);
-        } else {
-            flush(&mut buf, &mut spans);
-            spans.push(Span::styled(c.to_string(), Style::default().fg(Color::Rgb(171, 178, 191)).bg(bg)));
-        }
-    }
-    flush(&mut buf, &mut spans);
-
-    // Fill remainder with bg color
-    let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    if content_len < 84 {
-        spans.push(Span::styled(" ".repeat(84 - content_len), Style::default().bg(bg)));
-    }
-
-    Line::from(spans)
-}
-
-// ── String/cursor helpers ─────────────────────────────────────────────────────
-
-fn prev_char_len(s: &str, pos: usize) -> usize {
-    s[..pos].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0)
-}
-
-fn next_char_len(s: &str, pos: usize) -> usize {
-    s[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(0)
-}
-
-fn move_cursor_left(s: &str, pos: &mut usize) {
-    *pos = pos.saturating_sub(prev_char_len(s, *pos));
-}
-
-fn move_cursor_right(s: &str, pos: &mut usize) {
-    *pos = (*pos + next_char_len(s, *pos)).min(s.len());
-}
-
-fn delete_word_before(s: &mut String, pos: &mut usize) {
-    while *pos > 0 && s[..*pos].ends_with(|c: char| c == ' ' || c == '\n') {
-        let len = prev_char_len(s, *pos);
-        let start = *pos - len;
-        s.drain(start..*pos);
-        *pos = start;
-    }
-    while *pos > 0 && !s[..*pos].ends_with(|c: char| c == ' ' || c == '\n') {
-        let len = prev_char_len(s, *pos);
-        let start = *pos - len;
-        s.drain(start..*pos);
-        *pos = start;
-    }
 }

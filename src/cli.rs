@@ -27,6 +27,18 @@ pub enum Command {
     Config(ConfigArgs),
     /// Manage saved interactive sessions.
     Sessions(SessionsArgs),
+    /// Launch a browser-based chat UI on localhost.
+    Web(WebArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WebArgs {
+    #[command(flatten)]
+    pub options: AskOptions,
+
+    /// Port to listen on (default 8374).
+    #[arg(long, default_value = "8374")]
+    pub port: u16,
 }
 
 #[derive(Debug, Args)]

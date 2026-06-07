@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anveesa</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;height:100dvh;display:flex;flex-direction:column}
+header{padding:12px 20px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:12px;flex-shrink:0}
+header h1{font-size:16px;font-weight:600;color:#61afef}
+#info{font-size:12px;color:#8b949e}
+#messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px}
+.msg{max-width:860px;width:100%}
+.msg.user{align-self:flex-end}
+.msg.assistant{align-self:flex-start}
+.lbl{font-size:11px;color:#8b949e;margin-bottom:3px;padding:0 4px}
+.user .lbl{text-align:right}
+.bubble{padding:12px 16px;border-radius:10px;line-height:1.65;font-size:14px;word-break:break-word}
+.user .bubble{background:#1f4068;border-bottom-right-radius:3px}
+.assistant .bubble{background:#161b22;border:1px solid #21262d;border-bottom-left-radius:3px;white-space:pre-wrap}
+.assistant .bubble code{background:#0d1117;padding:2px 5px;border-radius:4px;font-size:13px;color:#98c379;font-family:ui-monospace,monospace}
+.assistant .bubble pre{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px 14px;margin:10px 0;overflow-x:auto}
+.assistant .bubble pre code{background:none;padding:0;font-size:13px}
+.bubble-row{display:flex;align-items:flex-start;gap:8px}
+.copy-btn{flex-shrink:0;margin-top:4px;font-size:11px;color:#8b949e;background:none;border:1px solid #21262d;border-radius:4px;padding:3px 8px;cursor:pointer;white-space:nowrap}
+.copy-btn:hover{color:#61afef;border-color:#61afef}
+#footer{padding:12px 20px;border-top:1px solid #21262d;flex-shrink:0}
+#input-row{display:flex;gap:10px;align-items:flex-end}
+#prompt{flex:1;background:#161b22;border:1px solid #21262d;border-radius:8px;color:#e6edf3;font-size:14px;padding:10px 14px;resize:none;min-height:44px;max-height:200px;outline:none;font-family:inherit;line-height:1.5}
+#prompt:focus{border-color:#61afef}
+#send{background:#238636;color:#fff;border:none;border-radius:8px;padding:0 20px;cursor:pointer;font-size:14px;height:44px;white-space:nowrap;transition:background .15s}
+#send:hover{background:#2ea043}
+#send:disabled{background:#21262d;color:#8b949e;cursor:not-allowed}
+#hint{font-size:11px;color:#4d5566;margin-top:6px}
+.thinking{font-size:13px;color:#8b949e;font-style:italic;padding:4px 16px;animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:0.5}50%{opacity:1}}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ Anveesa</h1>
+  <span id="info">loading…</span>
+</header>
+<div id="messages"></div>
+<div id="footer">
+  <div id="input-row">
+    <textarea id="prompt" rows="1" placeholder="Ask anything… (Enter to send · Shift+Enter for newline)"></textarea>
+    <button id="send">Send</button>
+  </div>
+  <div id="hint">Ctrl+C in terminal to stop the server</div>
+</div>
+<script>
+const msgs = document.getElementById('messages');
+const promptEl = document.getElementById('prompt');
+const sendBtn = document.getElementById('send');
+let history = [];
+let busy = false;
+
+fetch('/api/info').then(r => r.json()).then(d => {
+  document.getElementById('info').textContent = `${d.provider} · ${d.model}`;
+});
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function md(text) {
+  // fenced code blocks
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${esc(code.trimEnd())}</code></pre>`);
+  // inline code
+  text = text.replace(/`([^`\n]+)`/g, (_, c) => `<code>${esc(c)}</code>`);
+  // bold / italic
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+  return text;
+}
+
+function addMsg(role, rawText) {
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
+
+  const lbl = document.createElement('div');
+  lbl.className = 'lbl';
+  lbl.textContent = role === 'user' ? 'You' : 'Assistant';
+  wrap.appendChild(lbl);
+
+  const row = document.createElement('div');
+  row.className = 'bubble-row';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  row.appendChild(bubble);
+
+  if (role === 'assistant') {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.textContent = 'Copy';
+    btn.onclick = () => {
+      navigator.clipboard.writeText(bubble.dataset.raw || '');
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 1500);
+    };
+    row.appendChild(btn);
+  }
+
+  wrap.appendChild(row);
+  msgs.appendChild(wrap);
+
+  function update(text) {
+    bubble.dataset.raw = text;
+    if (role === 'assistant') {
+      bubble.innerHTML = md(esc(text));
+    } else {
+      bubble.textContent = text;
+    }
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  update(rawText);
+  return update;
+}
+
+async function send() {
+  const text = promptEl.value.trim();
+  if (!text || busy) return;
+
+  promptEl.value = '';
+  autoResize();
+  busy = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = '…';
+
+  history.push({ role: 'user', content: text });
+  addMsg('user', text);
+
+  // Thinking indicator
+  const thinkEl = document.createElement('div');
+  thinkEl.className = 'thinking';
+  thinkEl.textContent = '● Thinking…';
+  msgs.appendChild(thinkEl);
+  msgs.scrollTop = msgs.scrollHeight;
+
+  let accumulated = '';
+  let updateBubble = null;
+
+  try {
+    const resp = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: text, history: history.slice(0, -1) }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') break;
+        try {
+          const ev = JSON.parse(data);
+          if (ev.token !== undefined) {
+            if (!updateBubble) {
+              thinkEl.remove();
+              updateBubble = addMsg('assistant', '');
+            }
+            accumulated += ev.token;
+            updateBubble(accumulated);
+          }
+          if (ev.done) break;
+        } catch (_) {}
+      }
+    }
+
+    thinkEl.remove();
+    if (!updateBubble) addMsg('assistant', '(no response)');
+    history.push({ role: 'assistant', content: accumulated });
+  } catch (e) {
+    thinkEl.remove();
+    addMsg('assistant', `Error: ${e.message}`);
+    history.pop();
+  } finally {
+    busy = false;
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+    promptEl.focus();
+  }
+}
+
+function autoResize() {
+  promptEl.style.height = 'auto';
+  promptEl.style.height = Math.min(promptEl.scrollHeight, 200) + 'px';
+}
+
+sendBtn.onclick = send;
+promptEl.addEventListener('input', autoResize);
+promptEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+promptEl.focus();
+</script>
+</body>
+</html>
