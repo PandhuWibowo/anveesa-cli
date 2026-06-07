@@ -1,7 +1,7 @@
 {
   "name": "anveesa",
-  "version": "0.6.0",
-  "description": "A terminal CLI that wraps AI providers (OpenAI-compatible APIs and local CLIs) into a single unified command",
+  "version": "0.7.0",
+  "description": "Multi-provider terminal AI assistant — TUI, web UI, and one-shot mode backed by any OpenAI-compatible API",
   "main": "bin/anveesa.js",
   "bin": {
     "anveesa": "bin/anveesa.js"
@@ -26,7 +26,12 @@
     "rust",
     "openai",
     "agent",
-    "copilot"
+    "copilot",
+    "tui",
+    "llm",
+    "deepseek",
+    "groq",
+    "anthropic"
   ],
   "license": "MIT",
   "engines": {
