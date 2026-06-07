@@ -13,8 +13,7 @@ use std::{fs, path::Path};
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn tmp(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir()
-        .join(format!("anveesa_sc_{tag}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("anveesa_sc_{tag}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -180,10 +179,10 @@ fn s1_system_files() {
     // /etc/shadow and /etc/passwd, including uppercase variants  (6)
     assert!(sens("/etc/shadow"));
     assert!(sens("/etc/passwd"));
-    assert!(sens("/etc/SHADOW"));   // lowercased before check
+    assert!(sens("/etc/SHADOW")); // lowercased before check
     assert!(sens("/etc/PASSWD"));
-    assert!(!sens("/usr/bin/shadow"));  // not the system shadow file
-    assert!(!sens("/etc/sudoers"));     // not blocked
+    assert!(!sens("/usr/bin/shadow")); // not the system shadow file
+    assert!(!sens("/etc/sudoers")); // not blocked
 }
 
 #[test]
@@ -269,8 +268,14 @@ fn s2_percent_encode_unreserved() {
     assert_eq!(percent_encode("v1.0.0"), "v1.0.0");
     assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
     assert_eq!(percent_encode("test-case_1.0~beta"), "test-case_1.0~beta");
-    assert_eq!(percent_encode("abcdefghijklmnopqrstuvwxyz"), "abcdefghijklmnopqrstuvwxyz");
-    assert_eq!(percent_encode("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    assert_eq!(
+        percent_encode("abcdefghijklmnopqrstuvwxyz"),
+        "abcdefghijklmnopqrstuvwxyz"
+    );
+    assert_eq!(
+        percent_encode("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    );
     assert_eq!(percent_encode("0123456789"), "0123456789");
     assert_eq!(percent_encode("hello.world"), "hello.world");
 }
@@ -306,7 +311,10 @@ fn s2_percent_encode_mixed() {
     assert_eq!(percent_encode("foo bar baz"), "foo%20bar%20baz");
     assert_eq!(percent_encode("key=value"), "key%3Dvalue");
     assert_eq!(percent_encode("a+b=c"), "a%2Bb%3Dc");
-    assert_eq!(percent_encode("https://example.com"), "https%3A%2F%2Fexample.com");
+    assert_eq!(
+        percent_encode("https://example.com"),
+        "https%3A%2F%2Fexample.com"
+    );
     assert_eq!(percent_encode("hello\tworld"), "hello%09world");
     assert_eq!(percent_encode("line\nnewline"), "line%0Anewline");
     assert_eq!(percent_encode("quote\"test"), "quote%22test");
@@ -430,16 +438,16 @@ fn s5_skip_name_allowed() {
     assert!(!should_skip_name(".env"));
     assert!(!should_skip_name("main.rs"));
     assert!(!should_skip_name("Cargo.toml"));
-    assert!(!should_skip_name("target.rs"));     // not "target"
-    assert!(!should_skip_name("dist.rs"));       // not "dist"
-    assert!(!should_skip_name("builds"));        // not "build"
-    assert!(!should_skip_name("vendors"));       // not "vendor"
-    assert!(!should_skip_name("libraries"));     // not "Library"
+    assert!(!should_skip_name("target.rs")); // not "target"
+    assert!(!should_skip_name("dist.rs")); // not "dist"
+    assert!(!should_skip_name("builds")); // not "build"
+    assert!(!should_skip_name("vendors")); // not "vendor"
+    assert!(!should_skip_name("libraries")); // not "Library"
     assert!(!should_skip_name("next.config.js"));
     assert!(!should_skip_name("turbo.json"));
-    assert!(!should_skip_name("cache"));         // no leading dot
-    assert!(!should_skip_name("venv"));          // no leading dot
-    assert!(!should_skip_name("git"));           // no leading dot
+    assert!(!should_skip_name("cache")); // no leading dot
+    assert!(!should_skip_name("venv")); // no leading dot
+    assert!(!should_skip_name("git")); // no leading dot
     assert!(!should_skip_name("modules"));
     assert!(!should_skip_name("public"));
     assert!(!should_skip_name("static"));
@@ -455,60 +463,168 @@ fn s5_skip_name_allowed() {
 #[test]
 fn s6_describe_list_dir() {
     assert_eq!(describe_call("list_dir", r#"{}"#), "list directory .");
-    assert_eq!(describe_call("list_dir", r#"{"path":"src"}"#), "list directory src");
-    assert_eq!(describe_call("list_dir", r#"{"path":"/home/user"}"#), "list directory /home/user");
-    assert_eq!(describe_call("list_dir", r#"{"path":""}"#), "list directory .");
-    assert_eq!(describe_call("list_dir", "invalid-json"), "list directory .");
+    assert_eq!(
+        describe_call("list_dir", r#"{"path":"src"}"#),
+        "list directory src"
+    );
+    assert_eq!(
+        describe_call("list_dir", r#"{"path":"/home/user"}"#),
+        "list directory /home/user"
+    );
+    assert_eq!(
+        describe_call("list_dir", r#"{"path":""}"#),
+        "list directory ."
+    );
+    assert_eq!(
+        describe_call("list_dir", "invalid-json"),
+        "list directory ."
+    );
 }
 
 #[test]
 fn s6_describe_find_files() {
-    assert_eq!(describe_call("find_files", r#"{"query":"Cargo"}"#), "find files matching `Cargo` under .");
-    assert_eq!(describe_call("find_files", r#"{"query":"Cargo","root":"src"}"#), "find files matching `Cargo` under src");
-    assert_eq!(describe_call("find_files", r#"{"query":"main.rs","root":"/project"}"#), "find files matching `main.rs` under /project");
-    assert_eq!(describe_call("find_files", r#"{"query":"test"}"#), "find files matching `test` under .");
-    assert_eq!(describe_call("find_files", r#"{"query":"","root":"src"}"#), "find files matching `` under src");
+    assert_eq!(
+        describe_call("find_files", r#"{"query":"Cargo"}"#),
+        "find files matching `Cargo` under ."
+    );
+    assert_eq!(
+        describe_call("find_files", r#"{"query":"Cargo","root":"src"}"#),
+        "find files matching `Cargo` under src"
+    );
+    assert_eq!(
+        describe_call("find_files", r#"{"query":"main.rs","root":"/project"}"#),
+        "find files matching `main.rs` under /project"
+    );
+    assert_eq!(
+        describe_call("find_files", r#"{"query":"test"}"#),
+        "find files matching `test` under ."
+    );
+    assert_eq!(
+        describe_call("find_files", r#"{"query":"","root":"src"}"#),
+        "find files matching `` under src"
+    );
 }
 
 #[test]
 fn s6_describe_search_text() {
-    assert_eq!(describe_call("search_text", r#"{"query":"TODO"}"#), "search text `TODO` under .");
-    assert_eq!(describe_call("search_text", r#"{"query":"fn main","root":"src"}"#), "search text `fn main` under src");
-    assert_eq!(describe_call("search_text", r#"{"query":"FIXME","root":"/project"}"#), "search text `FIXME` under /project");
-    assert_eq!(describe_call("search_text", r#"{"query":"println!"}"#), "search text `println!` under .");
-    assert_eq!(describe_call("search_text", r#"{"query":"use std"}"#), "search text `use std` under .");
+    assert_eq!(
+        describe_call("search_text", r#"{"query":"TODO"}"#),
+        "search text `TODO` under ."
+    );
+    assert_eq!(
+        describe_call("search_text", r#"{"query":"fn main","root":"src"}"#),
+        "search text `fn main` under src"
+    );
+    assert_eq!(
+        describe_call("search_text", r#"{"query":"FIXME","root":"/project"}"#),
+        "search text `FIXME` under /project"
+    );
+    assert_eq!(
+        describe_call("search_text", r#"{"query":"println!"}"#),
+        "search text `println!` under ."
+    );
+    assert_eq!(
+        describe_call("search_text", r#"{"query":"use std"}"#),
+        "search text `use std` under ."
+    );
 }
 
 #[test]
 fn s6_describe_read_file() {
-    assert_eq!(describe_call("read_file", r#"{"path":"README.md"}"#), "read file README.md");
-    assert_eq!(describe_call("read_file", r#"{"path":"src/main.rs"}"#), "read file src/main.rs");
-    assert_eq!(describe_call("read_file", r#"{"path":"/etc/hosts"}"#), "read file /etc/hosts");
+    assert_eq!(
+        describe_call("read_file", r#"{"path":"README.md"}"#),
+        "read file README.md"
+    );
+    assert_eq!(
+        describe_call("read_file", r#"{"path":"src/main.rs"}"#),
+        "read file src/main.rs"
+    );
+    assert_eq!(
+        describe_call("read_file", r#"{"path":"/etc/hosts"}"#),
+        "read file /etc/hosts"
+    );
     assert_eq!(describe_call("read_file", r#"{"path":""}"#), "read file ");
-    assert_eq!(describe_call("read_file", r#"{"path":"Cargo.toml","start_line":10}"#), "read file Cargo.toml");
+    assert_eq!(
+        describe_call("read_file", r#"{"path":"Cargo.toml","start_line":10}"#),
+        "read file Cargo.toml"
+    );
 }
 
 #[test]
 fn s6_describe_web_search() {
-    assert_eq!(describe_call("web_search", r#"{"query":"rust termios"}"#), "web search `rust termios`");
-    assert_eq!(describe_call("web_search", r#"{"query":"tokio async"}"#), "web search `tokio async`");
-    assert_eq!(describe_call("web_search", r#"{"query":""}"#), "web search ``");
-    assert_eq!(describe_call("web_search", r#"{"query":"how to install rust"}"#), "web search `how to install rust`");
-    assert_eq!(describe_call("web_search", r#"{"query":"E0502"}"#), "web search `E0502`");
+    assert_eq!(
+        describe_call("web_search", r#"{"query":"rust termios"}"#),
+        "web search `rust termios`"
+    );
+    assert_eq!(
+        describe_call("web_search", r#"{"query":"tokio async"}"#),
+        "web search `tokio async`"
+    );
+    assert_eq!(
+        describe_call("web_search", r#"{"query":""}"#),
+        "web search ``"
+    );
+    assert_eq!(
+        describe_call("web_search", r#"{"query":"how to install rust"}"#),
+        "web search `how to install rust`"
+    );
+    assert_eq!(
+        describe_call("web_search", r#"{"query":"E0502"}"#),
+        "web search `E0502`"
+    );
 }
 
 #[test]
 fn s6_describe_write_tools() {
-    assert_eq!(describe_call("create_dir", r#"{"path":"hello"}"#), "create directory hello");
-    assert_eq!(describe_call("create_dir", r#"{"path":"src/components"}"#), "create directory src/components");
-    assert_eq!(describe_call("write_file", r#"{"path":"a.txt","content":"x"}"#), "write file a.txt");
-    assert_eq!(describe_call("write_file", r#"{"path":"src/main.rs","content":"fn main(){}"}"#), "write file src/main.rs");
-    assert_eq!(describe_call("edit_file", r#"{"path":"a.txt","old_string":"x","new_string":"y"}"#), "edit file a.txt");
-    assert_eq!(describe_call("edit_file", r#"{"path":"Cargo.toml","old_string":"0.3.0","new_string":"0.4.0"}"#), "edit file Cargo.toml");
-    assert_eq!(describe_call("run_command", r#"{"command":"cargo test"}"#), "run command `cargo test`");
-    assert_eq!(describe_call("run_command", r#"{"command":"git status"}"#), "run command `git status`");
-    assert_eq!(describe_call("run_command", r#"{"command":"ls -la"}"#), "run command `ls -la`");
-    assert_eq!(describe_call("run_command", r#"{"command":"make build"}"#), "run command `make build`");
+    assert_eq!(
+        describe_call("create_dir", r#"{"path":"hello"}"#),
+        "create directory hello"
+    );
+    assert_eq!(
+        describe_call("create_dir", r#"{"path":"src/components"}"#),
+        "create directory src/components"
+    );
+    assert_eq!(
+        describe_call("write_file", r#"{"path":"a.txt","content":"x"}"#),
+        "write file a.txt"
+    );
+    assert_eq!(
+        describe_call(
+            "write_file",
+            r#"{"path":"src/main.rs","content":"fn main(){}"}"#
+        ),
+        "write file src/main.rs"
+    );
+    assert_eq!(
+        describe_call(
+            "edit_file",
+            r#"{"path":"a.txt","old_string":"x","new_string":"y"}"#
+        ),
+        "edit file a.txt"
+    );
+    assert_eq!(
+        describe_call(
+            "edit_file",
+            r#"{"path":"Cargo.toml","old_string":"0.3.0","new_string":"0.4.0"}"#
+        ),
+        "edit file Cargo.toml"
+    );
+    assert_eq!(
+        describe_call("run_command", r#"{"command":"cargo test"}"#),
+        "run command `cargo test`"
+    );
+    assert_eq!(
+        describe_call("run_command", r#"{"command":"git status"}"#),
+        "run command `git status`"
+    );
+    assert_eq!(
+        describe_call("run_command", r#"{"command":"ls -la"}"#),
+        "run command `ls -la`"
+    );
+    assert_eq!(
+        describe_call("run_command", r#"{"command":"make build"}"#),
+        "run command `make build`"
+    );
 }
 
 #[test]
@@ -522,7 +638,7 @@ fn s6_describe_unknown_and_plan_tools() {
     // Very long args get truncated in the fallback branch
     let long = "x".repeat(200);
     let result = describe_call("some_tool", &format!(r#"{{"val":"{long}"}}"#));
-    assert!(result.len() < 200);  // truncated to 80 + "..." at most in fallback
+    assert!(result.len() < 200); // truncated to 80 + "..." at most in fallback
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -638,7 +754,9 @@ fn s9_definitions() {
     let rw_defs = definitions(true);
 
     let names_of = |defs: &[serde_json::Value]| -> Vec<String> {
-        defs.iter().map(|d| d["function"]["name"].as_str().unwrap_or("").to_string()).collect()
+        defs.iter()
+            .map(|d| d["function"]["name"].as_str().unwrap_or("").to_string())
+            .collect()
     };
 
     let ro_names = names_of(&ro_defs);
@@ -672,7 +790,9 @@ fn s9_definitions() {
 async fn s10_create_dir_basic() {
     let base = tmp("cd_basic");
     let path = base.join("new_dir");
-    let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["created"], json!(true));
     assert!(path.is_dir());
@@ -684,7 +804,9 @@ async fn s10_create_dir_basic() {
 async fn s10_create_dir_nested() {
     let base = tmp("cd_nested");
     let path = base.join("a").join("b").join("c");
-    let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["created"], json!(true));
     assert!(path.is_dir());
@@ -697,10 +819,14 @@ async fn s10_create_dir_nested() {
 async fn s10_create_dir_idempotent() {
     let base = tmp("cd_idempotent");
     let path = base.join("dir");
-    let r1 = create_dir(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r1 = create_dir(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r1));
     assert_eq!(r1["created"], json!(true));
-    let r2 = create_dir(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r2 = create_dir(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r2));
     assert_eq!(r2["created"], json!(false));
     assert!(path.is_dir());
@@ -733,7 +859,7 @@ async fn s10_create_dir_error_on_existing_file() {
     fs::write(&file_path, "data").unwrap();
     let r = create_dir(&json!({"path": file_path.to_str().unwrap()}).to_string()).await;
     assert!(r.is_err());
-    assert!(file_path.is_file());   // file unchanged
+    assert!(file_path.is_file()); // file unchanged
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -743,7 +869,9 @@ async fn s10_create_dir_multiple_distinct() {
     let base = tmp("cd_multi");
     for name in ["alpha", "beta", "gamma", "delta", "epsilon"] {
         let path = base.join(name);
-        let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+        let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string())
+            .await
+            .unwrap();
         assert!(is_ok(&r));
         assert!(path.is_dir());
     }
@@ -755,7 +883,9 @@ async fn s10_create_dir_multiple_distinct() {
 async fn s10_create_dir_unicode_name() {
     let base = tmp("cd_unicode");
     let path = base.join("データ");
-    let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["created"], json!(true));
     assert!(path.is_dir());
@@ -766,7 +896,9 @@ async fn s10_create_dir_unicode_name() {
 async fn s10_create_dir_deep_nesting() {
     let base = tmp("cd_deep");
     let path = base.join("a/b/c/d/e/f/g");
-    let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = create_dir(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert!(path.is_dir());
     fs::remove_dir_all(&base).unwrap();
@@ -780,7 +912,10 @@ async fn s10_create_dir_deep_nesting() {
 async fn s11_write_file_basic() {
     let base = tmp("wf_basic");
     let path = base.join("hello.txt");
-    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": "hello world"}).to_string()).await.unwrap();
+    let r =
+        write_file(&json!({"path": path.to_str().unwrap(), "content": "hello world"}).to_string())
+            .await
+            .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["created"], json!(true));
     assert_eq!(r["bytes_written"], json!(11));
@@ -794,9 +929,12 @@ async fn s11_write_file_overwrite() {
     let base = tmp("wf_overwrite");
     let path = base.join("file.txt");
     fs::write(&path, "original content").unwrap();
-    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": "new content"}).to_string()).await.unwrap();
+    let r =
+        write_file(&json!({"path": path.to_str().unwrap(), "content": "new content"}).to_string())
+            .await
+            .unwrap();
     assert!(is_ok(&r));
-    assert_eq!(r["created"], json!(false));   // file already existed
+    assert_eq!(r["created"], json!(false)); // file already existed
     assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
     assert_eq!(r["bytes_written"], json!(11));
     fs::remove_dir_all(&base).unwrap();
@@ -806,7 +944,9 @@ async fn s11_write_file_overwrite() {
 async fn s11_write_file_creates_parents() {
     let base = tmp("wf_parents");
     let path = base.join("a").join("b").join("c").join("file.txt");
-    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": "data"}).to_string()).await.unwrap();
+    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": "data"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["created"], json!(true));
     assert!(path.is_file());
@@ -827,9 +967,15 @@ async fn s11_write_file_sensitive_blocked() {
         base.join(".npmrc"),
     ];
     for path in &blocked {
-        let r = write_file(&json!({"path": path.to_str().unwrap(), "content": "SECRET"}).to_string()).await;
+        let r =
+            write_file(&json!({"path": path.to_str().unwrap(), "content": "SECRET"}).to_string())
+                .await;
         assert!(r.is_err(), "writing to {} must be blocked", path.display());
-        assert!(!path.exists(), "{} must not have been created", path.display());
+        assert!(
+            !path.exists(),
+            "{} must not have been created",
+            path.display()
+        );
     }
     fs::remove_dir_all(&base).unwrap();
 }
@@ -838,7 +984,9 @@ async fn s11_write_file_sensitive_blocked() {
 async fn s11_write_file_empty_content() {
     let base = tmp("wf_empty");
     let path = base.join("empty.txt");
-    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": ""}).to_string()).await.unwrap();
+    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": ""}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["bytes_written"], json!(0));
     assert_eq!(r["created"], json!(true));
@@ -851,7 +999,9 @@ async fn s11_write_file_multiline() {
     let base = tmp("wf_multiline");
     let path = base.join("multi.txt");
     let content = "line1\nline2\nline3\n";
-    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": content}).to_string()).await.unwrap();
+    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": content}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["bytes_written"], json!(content.len()));
     let disk = fs::read_to_string(&path).unwrap();
@@ -866,7 +1016,9 @@ async fn s11_write_file_unicode() {
     let base = tmp("wf_unicode");
     let path = base.join("unicode.txt");
     let content = "Hello 日本語 Ñoño café 🦀";
-    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": content}).to_string()).await.unwrap();
+    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": content}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(fs::read_to_string(&path).unwrap(), content);
     assert_eq!(r["bytes_written"], json!(content.len()));
@@ -879,15 +1031,22 @@ async fn s11_write_file_bytes_written_accuracy() {
     let base = tmp("wf_bytes");
     for (content, expected_bytes) in [
         ("abc", 3usize),
-        ("café", 5),          // 'é' is 2 bytes in UTF-8
-        ("日", 3),            // 3 bytes
-        ("🦀", 4),            // 4 bytes
+        ("café", 5), // 'é' is 2 bytes in UTF-8
+        ("日", 3),   // 3 bytes
+        ("🦀", 4),   // 4 bytes
         ("", 0),
     ] {
         let path = base.join(format!("f_{expected_bytes}.txt"));
-        let r = write_file(&json!({"path": path.to_str().unwrap(), "content": content}).to_string()).await.unwrap();
+        let r =
+            write_file(&json!({"path": path.to_str().unwrap(), "content": content}).to_string())
+                .await
+                .unwrap();
         assert!(is_ok(&r));
-        assert_eq!(r["bytes_written"], json!(expected_bytes), "content: {content:?}");
+        assert_eq!(
+            r["bytes_written"],
+            json!(expected_bytes),
+            "content: {content:?}"
+        );
     }
     fs::remove_dir_all(&base).unwrap();
 }
@@ -897,11 +1056,17 @@ async fn s11_write_file_created_flag_semantics() {
     // created=true on first write, false on subsequent overwrites  (6)
     let base = tmp("wf_flag");
     let path = base.join("flag.txt");
-    let r1 = write_file(&json!({"path": path.to_str().unwrap(), "content": "v1"}).to_string()).await.unwrap();
+    let r1 = write_file(&json!({"path": path.to_str().unwrap(), "content": "v1"}).to_string())
+        .await
+        .unwrap();
     assert_eq!(r1["created"], json!(true));
-    let r2 = write_file(&json!({"path": path.to_str().unwrap(), "content": "v2"}).to_string()).await.unwrap();
+    let r2 = write_file(&json!({"path": path.to_str().unwrap(), "content": "v2"}).to_string())
+        .await
+        .unwrap();
     assert_eq!(r2["created"], json!(false));
-    let r3 = write_file(&json!({"path": path.to_str().unwrap(), "content": "v3"}).to_string()).await.unwrap();
+    let r3 = write_file(&json!({"path": path.to_str().unwrap(), "content": "v3"}).to_string())
+        .await
+        .unwrap();
     assert_eq!(r3["created"], json!(false));
     assert_eq!(fs::read_to_string(&path).unwrap(), "v3");
     // All three were ok
@@ -916,7 +1081,9 @@ async fn s11_write_file_large_content() {
     let base = tmp("wf_large");
     let path = base.join("large.txt");
     let content = "x".repeat(500_000);
-    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": content}).to_string()).await.unwrap();
+    let r = write_file(&json!({"path": path.to_str().unwrap(), "content": content}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["bytes_written"], json!(500_000usize));
     assert_eq!(fs::metadata(&path).unwrap().len(), 500_000);
@@ -933,7 +1100,12 @@ async fn s12_edit_file_basic_replace() {
     let base = tmp("ef_basic");
     let path = base.join("note.txt");
     fs::write(&path, "alpha beta gamma").unwrap();
-    let r = edit_file(&json!({"path": path.to_str().unwrap(), "old_string": "beta", "new_string": "delta"}).to_string()).await.unwrap();
+    let r = edit_file(
+        &json!({"path": path.to_str().unwrap(), "old_string": "beta", "new_string": "delta"})
+            .to_string(),
+    )
+    .await
+    .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["replacements"], json!(1));
     assert_eq!(fs::read_to_string(&path).unwrap(), "alpha delta gamma");
@@ -946,11 +1118,16 @@ async fn s12_edit_file_multiline_replacement() {
     let base = tmp("ef_multi");
     let path = base.join("code.rs");
     fs::write(&path, "fn foo() {\n    // old\n}\n").unwrap();
-    let r = edit_file(&json!({
-        "path": path.to_str().unwrap(),
-        "old_string": "// old",
-        "new_string": "// new implementation"
-    }).to_string()).await.unwrap();
+    let r = edit_file(
+        &json!({
+            "path": path.to_str().unwrap(),
+            "old_string": "// old",
+            "new_string": "// new implementation"
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
     assert!(is_ok(&r));
     let disk = fs::read_to_string(&path).unwrap();
     assert!(disk.contains("// new implementation"));
@@ -963,9 +1140,13 @@ async fn s12_edit_file_error_not_found() {
     let base = tmp("ef_notfound");
     let path = base.join("file.txt");
     fs::write(&path, "hello world").unwrap();
-    let r = edit_file(&json!({"path": path.to_str().unwrap(), "old_string": "missing", "new_string": "x"}).to_string()).await;
+    let r = edit_file(
+        &json!({"path": path.to_str().unwrap(), "old_string": "missing", "new_string": "x"})
+            .to_string(),
+    )
+    .await;
     assert!(r.is_err());
-    assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");  // unchanged
+    assert_eq!(fs::read_to_string(&path).unwrap(), "hello world"); // unchanged
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -974,7 +1155,10 @@ async fn s12_edit_file_error_duplicate_match() {
     let base = tmp("ef_dup");
     let path = base.join("dup.txt");
     fs::write(&path, "x and x again").unwrap();
-    let r = edit_file(&json!({"path": path.to_str().unwrap(), "old_string": "x", "new_string": "y"}).to_string()).await;
+    let r = edit_file(
+        &json!({"path": path.to_str().unwrap(), "old_string": "x", "new_string": "y"}).to_string(),
+    )
+    .await;
     assert!(r.is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), "x and x again");
     fs::remove_dir_all(&base).unwrap();
@@ -985,7 +1169,10 @@ async fn s12_edit_file_error_empty_old_string() {
     let base = tmp("ef_empty_old");
     let path = base.join("file.txt");
     fs::write(&path, "some content").unwrap();
-    let r = edit_file(&json!({"path": path.to_str().unwrap(), "old_string": "", "new_string": "x"}).to_string()).await;
+    let r = edit_file(
+        &json!({"path": path.to_str().unwrap(), "old_string": "", "new_string": "x"}).to_string(),
+    )
+    .await;
     assert!(r.is_err());
     fs::remove_dir_all(&base).unwrap();
 }
@@ -995,7 +1182,11 @@ async fn s12_edit_file_error_identical_strings() {
     let base = tmp("ef_identical");
     let path = base.join("file.txt");
     fs::write(&path, "hello").unwrap();
-    let r = edit_file(&json!({"path": path.to_str().unwrap(), "old_string": "hello", "new_string": "hello"}).to_string()).await;
+    let r = edit_file(
+        &json!({"path": path.to_str().unwrap(), "old_string": "hello", "new_string": "hello"})
+            .to_string(),
+    )
+    .await;
     assert!(r.is_err());
     fs::remove_dir_all(&base).unwrap();
 }
@@ -1004,7 +1195,10 @@ async fn s12_edit_file_error_identical_strings() {
 async fn s12_edit_file_error_missing_file() {
     let base = tmp("ef_missing");
     let path = base.join("nonexistent.txt");
-    let r = edit_file(&json!({"path": path.to_str().unwrap(), "old_string": "x", "new_string": "y"}).to_string()).await;
+    let r = edit_file(
+        &json!({"path": path.to_str().unwrap(), "old_string": "x", "new_string": "y"}).to_string(),
+    )
+    .await;
     assert!(r.is_err());
     fs::remove_dir_all(&base).unwrap();
 }
@@ -1015,11 +1209,15 @@ async fn s12_edit_file_sensitive_blocked() {
     // Create a file with a sensitive name and try to edit it
     let env_file = base.join(".env");
     fs::write(&env_file, "KEY=value").unwrap();
-    let r = edit_file(&json!({
-        "path": env_file.to_str().unwrap(),
-        "old_string": "KEY=value",
-        "new_string": "KEY=new"
-    }).to_string()).await;
+    let r = edit_file(
+        &json!({
+            "path": env_file.to_str().unwrap(),
+            "old_string": "KEY=value",
+            "new_string": "KEY=new"
+        })
+        .to_string(),
+    )
+    .await;
     assert!(r.is_err());
     // File should remain unchanged
     assert_eq!(fs::read_to_string(&env_file).unwrap(), "KEY=value");
@@ -1031,11 +1229,16 @@ async fn s12_edit_file_unicode_content() {
     let base = tmp("ef_unicode");
     let path = base.join("unicode.txt");
     fs::write(&path, "Hello 日本語 World").unwrap();
-    let r = edit_file(&json!({
-        "path": path.to_str().unwrap(),
-        "old_string": "日本語",
-        "new_string": "Rust"
-    }).to_string()).await.unwrap();
+    let r = edit_file(
+        &json!({
+            "path": path.to_str().unwrap(),
+            "old_string": "日本語",
+            "new_string": "Rust"
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
     assert!(is_ok(&r));
     assert_eq!(fs::read_to_string(&path).unwrap(), "Hello Rust World");
     fs::remove_dir_all(&base).unwrap();
@@ -1048,11 +1251,16 @@ async fn s12_edit_file_preserves_other_content() {
     let path = base.join("preserve.txt");
     let original = "line1\nTARGET\nline3\nline4\nline5\n";
     fs::write(&path, original).unwrap();
-    let r = edit_file(&json!({
-        "path": path.to_str().unwrap(),
-        "old_string": "TARGET",
-        "new_string": "REPLACED"
-    }).to_string()).await.unwrap();
+    let r = edit_file(
+        &json!({
+            "path": path.to_str().unwrap(),
+            "old_string": "TARGET",
+            "new_string": "REPLACED"
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
     assert!(is_ok(&r));
     let disk = fs::read_to_string(&path).unwrap();
     assert!(disk.contains("line1"));
@@ -1073,7 +1281,9 @@ async fn s13_read_file_all_lines() {
     let base = tmp("rf_all");
     let path = base.join("five.txt");
     fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
-    let r = read_file(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = read_file(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     let lines = r["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 5);
@@ -1090,7 +1300,9 @@ async fn s13_read_file_start_line() {
     let path = base.join("abc.txt");
     fs::write(&path, "alpha\nbeta\ngamma\ndelta").unwrap();
     // Read from line 3 onward
-    let r = read_file(&json!({"path": path.to_str().unwrap(), "start_line": 3}).to_string()).await.unwrap();
+    let r = read_file(&json!({"path": path.to_str().unwrap(), "start_line": 3}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     let lines = r["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 2);
@@ -1107,7 +1319,9 @@ async fn s13_read_file_max_lines_cap() {
     let content: String = (1..=10).map(|i| format!("line{i}\n")).collect();
     let path = base.join("ten.txt");
     fs::write(&path, &content).unwrap();
-    let r = read_file(&json!({"path": path.to_str().unwrap(), "max_lines": 4}).to_string()).await.unwrap();
+    let r = read_file(&json!({"path": path.to_str().unwrap(), "max_lines": 4}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     let lines = r["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 4);
@@ -1123,7 +1337,11 @@ async fn s13_read_file_start_and_max() {
     let path = base.join("twenty.txt");
     fs::write(&path, &content).unwrap();
     // Start at line 10, read 5 lines
-    let r = read_file(&json!({"path": path.to_str().unwrap(), "start_line": 10, "max_lines": 5}).to_string()).await.unwrap();
+    let r = read_file(
+        &json!({"path": path.to_str().unwrap(), "start_line": 10, "max_lines": 5}).to_string(),
+    )
+    .await
+    .unwrap();
     assert!(is_ok(&r));
     let lines = r["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 5);
@@ -1166,7 +1384,9 @@ async fn s13_read_file_unicode_content() {
     let base = tmp("rf_unicode");
     let path = base.join("uni.txt");
     fs::write(&path, "日本語\ncafé\n🦀").unwrap();
-    let r = read_file(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = read_file(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     let lines = r["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 3);
@@ -1181,7 +1401,9 @@ async fn s13_read_file_single_line() {
     let base = tmp("rf_single");
     let path = base.join("one.txt");
     fs::write(&path, "only one line").unwrap();
-    let r = read_file(&json!({"path": path.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = read_file(&json!({"path": path.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     let lines = r["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 1);
@@ -1196,7 +1418,9 @@ async fn s13_read_file_start_beyond_eof() {
     let base = tmp("rf_beyond");
     let path = base.join("short.txt");
     fs::write(&path, "line1\nline2").unwrap();
-    let r = read_file(&json!({"path": path.to_str().unwrap(), "start_line": 100}).to_string()).await.unwrap();
+    let r = read_file(&json!({"path": path.to_str().unwrap(), "start_line": 100}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["lines"].as_array().unwrap().len(), 0);
     fs::remove_dir_all(&base).unwrap();
@@ -1208,7 +1432,9 @@ async fn s13_read_file_start_beyond_eof() {
 
 #[tokio::test]
 async fn s14_run_command_basic_success() {
-    let r = run_command(&json!({"command": "printf hello"}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": "printf hello"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["exit_code"], json!(0));
     assert_eq!(r["stdout"], json!("hello"));
@@ -1219,7 +1445,9 @@ async fn s14_run_command_basic_success() {
 async fn s14_run_command_exit_codes() {
     // Various exit codes  (8)
     for code in [0u32, 1, 2, 3, 42, 127, 255] {
-        let r = run_command(&json!({"command": format!("exit {code}")}).to_string()).await.unwrap();
+        let r = run_command(&json!({"command": format!("exit {code}")}).to_string())
+            .await
+            .unwrap();
         assert_eq!(r["exit_code"], json!(code), "exit code {code}");
         if code == 0 {
             assert_eq!(r["ok"], json!(true));
@@ -1228,13 +1456,17 @@ async fn s14_run_command_exit_codes() {
         }
     }
     // Also confirm ok=false for non-zero
-    let r = run_command(&json!({"command": "exit 1"}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": "exit 1"}).to_string())
+        .await
+        .unwrap();
     assert_eq!(r["ok"], json!(false));
 }
 
 #[tokio::test]
 async fn s14_run_command_stderr_capture() {
-    let r = run_command(&json!({"command": "printf errtext >&2"}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": "printf errtext >&2"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["stdout"], json!(""));
     assert_eq!(r["stderr"], json!("errtext"));
@@ -1242,7 +1474,9 @@ async fn s14_run_command_stderr_capture() {
 
 #[tokio::test]
 async fn s14_run_command_both_streams() {
-    let r = run_command(&json!({"command": "printf stdout; printf stderr >&2"}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": "printf stdout; printf stderr >&2"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["stdout"], json!("stdout"));
     assert_eq!(r["stderr"], json!("stderr"));
@@ -1262,14 +1496,18 @@ async fn s14_run_command_whitespace_command_error() {
 
 #[tokio::test]
 async fn s14_run_command_pipe() {
-    let r = run_command(&json!({"command": "printf 'hello world' | tr ' ' '_'"}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": "printf 'hello world' | tr ' ' '_'"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["stdout"], json!("hello_world"));
 }
 
 #[tokio::test]
 async fn s14_run_command_multiline_output() {
-    let r = run_command(&json!({"command": "printf 'a\\nb\\nc\\n'"}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": "printf 'a\\nb\\nc\\n'"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     let stdout = r["stdout"].as_str().unwrap();
     assert_eq!(stdout.lines().count(), 3);
@@ -1280,7 +1518,9 @@ async fn s14_run_command_multiline_output() {
 
 #[tokio::test]
 async fn s14_run_command_env_var() {
-    let r = run_command(&json!({"command": "MY_VAR=testval; printf $MY_VAR"}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": "MY_VAR=testval; printf $MY_VAR"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["stdout"], json!("testval"));
 }
@@ -1290,7 +1530,9 @@ async fn s14_run_command_file_operations() {
     let base = tmp("rc_fileops");
     let path = base.join("out.txt");
     let cmd = format!("printf created > {}", path.to_str().unwrap());
-    let r = run_command(&json!({"command": cmd}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": cmd}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert!(path.exists());
     assert_eq!(fs::read_to_string(&path).unwrap().trim(), "created");
@@ -1300,7 +1542,9 @@ async fn s14_run_command_file_operations() {
 #[tokio::test]
 async fn s14_run_command_custom_timeout() {
     // Timeout parameter is accepted and doesn't change fast-command behavior  (4)
-    let r = run_command(&json!({"command": "printf fast", "timeout_secs": 30}).to_string()).await.unwrap();
+    let r = run_command(&json!({"command": "printf fast", "timeout_secs": 30}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["stdout"], json!("fast"));
     assert_eq!(r["exit_code"], json!(0));
@@ -1317,9 +1561,15 @@ async fn s14_run_command_arithmetic() {
         ("expr 10 / 2", "5"),
         ("echo $((100 % 7))", "2"),
     ] {
-        let r = run_command(&json!({"command": expr}).to_string()).await.unwrap();
+        let r = run_command(&json!({"command": expr}).to_string())
+            .await
+            .unwrap();
         assert!(is_ok(&r), "command: {expr}");
-        assert_eq!(r["stdout"].as_str().unwrap().trim(), expected, "command: {expr}");
+        assert_eq!(
+            r["stdout"].as_str().unwrap().trim(),
+            expected,
+            "command: {expr}"
+        );
     }
 }
 
@@ -1333,12 +1583,17 @@ async fn s15_list_dir_basic() {
     fs::write(base.join("file_a.txt"), "a").unwrap();
     fs::write(base.join("file_b.txt"), "b").unwrap();
     fs::create_dir(base.join("subdir")).unwrap();
-    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["truncated"], json!(false));
     let entries = r["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
-    let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = entries
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"file_a.txt"));
     assert!(names.contains(&"file_b.txt"));
     assert!(names.contains(&"subdir"));
@@ -1350,9 +1605,14 @@ async fn s15_list_dir_kinds() {
     let base = tmp("ld_kinds");
     fs::write(base.join("file.txt"), "x").unwrap();
     fs::create_dir(base.join("dir")).unwrap();
-    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     let entries = r["entries"].as_array().unwrap();
-    let file_entry = entries.iter().find(|e| e["name"] == json!("file.txt")).unwrap();
+    let file_entry = entries
+        .iter()
+        .find(|e| e["name"] == json!("file.txt"))
+        .unwrap();
     let dir_entry = entries.iter().find(|e| e["name"] == json!("dir")).unwrap();
     assert_eq!(file_entry["kind"], json!("file"));
     assert_eq!(dir_entry["kind"], json!("dir"));
@@ -1374,9 +1634,14 @@ async fn s15_list_dir_skips_git() {
     fs::create_dir(base.join("vendor")).unwrap();
     fs::create_dir(base.join("Library")).unwrap();
     fs::write(base.join("keep.txt"), "keep").unwrap();
-    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     let entries = r["entries"].as_array().unwrap();
-    let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = entries
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
     assert!(!names.contains(&".git"));
     assert!(!names.contains(&"node_modules"));
     assert!(!names.contains(&"target"));
@@ -1411,7 +1676,9 @@ async fn s15_list_dir_error_nonexistent() {
 #[tokio::test]
 async fn s15_list_dir_empty_directory() {
     let base = tmp("ld_empty");
-    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["entries"].as_array().unwrap().len(), 0);
     assert_eq!(r["truncated"], json!(false));
@@ -1425,7 +1692,9 @@ async fn s15_list_dir_truncation() {
     for i in 0..(MAX_DIR_ENTRIES + 5) {
         fs::write(base.join(format!("f{i:04}.txt")), "x").unwrap();
     }
-    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string()).await.unwrap();
+    let r = list_dir(&json!({"path": base.to_str().unwrap()}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["truncated"], json!(true));
     let entries = r["entries"].as_array().unwrap();
@@ -1443,12 +1712,17 @@ async fn s16_find_files_basic() {
     fs::write(base.join("main.rs"), "fn main() {}").unwrap();
     fs::write(base.join("lib.rs"), "pub fn add() {}").unwrap();
     fs::write(base.join("README.md"), "docs").unwrap();
-    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": ".rs"}).to_string()).await.unwrap();
+    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": ".rs"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["truncated"], json!(false));
     let results = r["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
-    let paths: Vec<&str> = results.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    let paths: Vec<&str> = results
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
     assert!(paths.iter().any(|p| p.ends_with("main.rs")));
     assert!(paths.iter().any(|p| p.ends_with("lib.rs")));
     fs::remove_dir_all(&base).unwrap();
@@ -1459,7 +1733,9 @@ async fn s16_find_files_case_insensitive() {
     let base = tmp("ff_case");
     fs::write(base.join("Cargo.toml"), "").unwrap();
     fs::write(base.join("cargo.lock"), "").unwrap();
-    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "cargo"}).to_string()).await.unwrap();
+    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "cargo"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     // Both files match because the query is lowercased
     assert_eq!(results.len(), 2);
@@ -1473,10 +1749,15 @@ async fn s16_find_files_recursive() {
     fs::write(base.join("src/main.rs"), "").unwrap();
     fs::write(base.join("src/util/helper.rs"), "").unwrap();
     fs::write(base.join("README.md"), "").unwrap();
-    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": ".rs"}).to_string()).await.unwrap();
+    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": ".rs"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
-    let paths: Vec<&str> = results.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    let paths: Vec<&str> = results
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
     assert!(paths.iter().any(|p| p.ends_with("main.rs")));
     assert!(paths.iter().any(|p| p.ends_with("helper.rs")));
     fs::remove_dir_all(&base).unwrap();
@@ -1486,7 +1767,9 @@ async fn s16_find_files_recursive() {
 async fn s16_find_files_no_results() {
     let base = tmp("ff_none");
     fs::write(base.join("file.txt"), "").unwrap();
-    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "zzznomatch"}).to_string()).await.unwrap();
+    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "zzznomatch"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["results"].as_array().unwrap().len(), 0);
     assert_eq!(r["truncated"], json!(false));
@@ -1495,7 +1778,9 @@ async fn s16_find_files_no_results() {
 
 #[tokio::test]
 async fn s16_find_files_invalid_root() {
-    let r = find_files(&json!({"root": "/tmp/anveesa_no_such_dir_xyz", "query": "file"}).to_string()).await;
+    let r =
+        find_files(&json!({"root": "/tmp/anveesa_no_such_dir_xyz", "query": "file"}).to_string())
+            .await;
     assert!(r.is_err());
 }
 
@@ -1505,12 +1790,19 @@ async fn s16_find_files_skips_node_modules() {
     fs::create_dir_all(base.join("node_modules/lodash")).unwrap();
     fs::write(base.join("node_modules/lodash/index.js"), "").unwrap();
     fs::write(base.join("index.js"), "").unwrap();
-    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "index.js"}).to_string()).await.unwrap();
+    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "index.js"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     // Only the root-level index.js, not the one inside node_modules
     assert_eq!(results.len(), 1);
     assert!(results[0]["path"].as_str().unwrap().ends_with("index.js"));
-    assert!(!results[0]["path"].as_str().unwrap().contains("node_modules"));
+    assert!(
+        !results[0]["path"]
+            .as_str()
+            .unwrap()
+            .contains("node_modules")
+    );
     fs::remove_dir_all(&base).unwrap();
 }
 
@@ -1520,11 +1812,19 @@ async fn s16_find_files_kind_field() {
     let base = tmp("ff_kind");
     fs::write(base.join("myfile.txt"), "").unwrap();
     fs::create_dir(base.join("mydir")).unwrap();
-    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "my"}).to_string()).await.unwrap();
+    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "my"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
-    let file_entry = results.iter().find(|e| e["path"].as_str().unwrap().ends_with("myfile.txt")).unwrap();
-    let dir_entry = results.iter().find(|e| e["path"].as_str().unwrap().ends_with("mydir")).unwrap();
+    let file_entry = results
+        .iter()
+        .find(|e| e["path"].as_str().unwrap().ends_with("myfile.txt"))
+        .unwrap();
+    let dir_entry = results
+        .iter()
+        .find(|e| e["path"].as_str().unwrap().ends_with("mydir"))
+        .unwrap();
     assert_eq!(file_entry["kind"], json!("file"));
     assert_eq!(dir_entry["kind"], json!("dir"));
     fs::remove_dir_all(&base).unwrap();
@@ -1537,7 +1837,9 @@ async fn s16_find_files_truncation() {
     for i in 0..(MAX_SEARCH_RESULTS + 10) {
         fs::write(base.join(format!("match_{i:04}.txt")), "").unwrap();
     }
-    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "match"}).to_string()).await.unwrap();
+    let r = find_files(&json!({"root": base.to_str().unwrap(), "query": "match"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["truncated"], json!(true));
     assert_eq!(r["results"].as_array().unwrap().len(), MAX_SEARCH_RESULTS);
@@ -1551,8 +1853,14 @@ async fn s16_find_files_truncation() {
 #[tokio::test]
 async fn s17_search_text_basic() {
     let base = tmp("st_basic");
-    fs::write(base.join("hello.txt"), "hello world\ngoodbye world\nhello again").unwrap();
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "hello"}).to_string()).await.unwrap();
+    fs::write(
+        base.join("hello.txt"),
+        "hello world\ngoodbye world\nhello again",
+    )
+    .unwrap();
+    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "hello"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["truncated"], json!(false));
     let results = r["results"].as_array().unwrap();
@@ -1567,7 +1875,9 @@ async fn s17_search_text_basic() {
 async fn s17_search_text_case_insensitive() {
     let base = tmp("st_case");
     fs::write(base.join("case.txt"), "Hello\nhELLO\nHELLO\nhello").unwrap();
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "hello"}).to_string()).await.unwrap();
+    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "hello"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     assert_eq!(results.len(), 4);
     fs::remove_dir_all(&base).unwrap();
@@ -1579,11 +1889,16 @@ async fn s17_search_text_multiple_files() {
     fs::write(base.join("a.txt"), "needle in a").unwrap();
     fs::write(base.join("b.txt"), "no match here").unwrap();
     fs::write(base.join("c.txt"), "another needle").unwrap();
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "needle"}).to_string()).await.unwrap();
+    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "needle"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     let results = r["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
-    let paths: Vec<&str> = results.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    let paths: Vec<&str> = results
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
     assert!(paths.iter().any(|p| p.ends_with("a.txt")));
     assert!(paths.iter().any(|p| p.ends_with("c.txt")));
     assert!(!paths.iter().any(|p| p.ends_with("b.txt")));
@@ -1594,7 +1909,11 @@ async fn s17_search_text_multiple_files() {
 async fn s17_search_text_no_results() {
     let base = tmp("st_none");
     fs::write(base.join("file.txt"), "content without the thing").unwrap();
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "zzz_not_present"}).to_string()).await.unwrap();
+    let r = search_text(
+        &json!({"root": base.to_str().unwrap(), "query": "zzz_not_present"}).to_string(),
+    )
+    .await
+    .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["results"].as_array().unwrap().len(), 0);
     assert_eq!(r["truncated"], json!(false));
@@ -1608,7 +1927,9 @@ async fn s17_search_text_sensitive_file_skipped() {
     let env_path = base.join(".env");
     fs::write(&env_path, "NEEDLE=value").unwrap();
     fs::write(base.join("normal.txt"), "needle in normal file").unwrap();
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "needle"}).to_string()).await.unwrap();
+    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "needle"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     // Only normal.txt should appear
     assert_eq!(results.len(), 1);
@@ -1622,14 +1943,19 @@ async fn s17_search_text_all_occurrences_in_file() {
     let base = tmp("st_allmatches");
     let content = "TODO: first\nsome other line\nTODO: second\nand another\nTODO: third\n";
     fs::write(base.join("tasks.txt"), content).unwrap();
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "todo"}).to_string()).await.unwrap();
+    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "todo"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     // All three TODO lines returned
     assert_eq!(results.len(), 3);
     assert_eq!(results[0]["line"], json!(1));
     assert_eq!(results[1]["line"], json!(3));
     assert_eq!(results[2]["line"], json!(5));
-    let previews: Vec<&str> = results.iter().map(|r| r["preview"].as_str().unwrap()).collect();
+    let previews: Vec<&str> = results
+        .iter()
+        .map(|r| r["preview"].as_str().unwrap())
+        .collect();
     assert!(previews[0].contains("first"));
     assert!(previews[1].contains("second"));
     assert!(previews[2].contains("third"));
@@ -1641,7 +1967,9 @@ async fn s17_search_text_preview_trimmed() {
     // Preview should be trimmed  (4)
     let base = tmp("st_trim");
     fs::write(base.join("padded.txt"), "   MATCH with spaces   \n").unwrap();
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "match"}).to_string()).await.unwrap();
+    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "match"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     let preview = results[0]["preview"].as_str().unwrap();
@@ -1652,7 +1980,8 @@ async fn s17_search_text_preview_trimmed() {
 
 #[tokio::test]
 async fn s17_search_text_error_invalid_root() {
-    let r = search_text(&json!({"root": "/tmp/anveesa_no_such_xyz", "query": "foo"}).to_string()).await;
+    let r =
+        search_text(&json!({"root": "/tmp/anveesa_no_such_xyz", "query": "foo"}).to_string()).await;
     assert!(r.is_err());
 }
 
@@ -1671,7 +2000,9 @@ async fn s17_search_text_skips_target_dir() {
     fs::create_dir_all(base.join("target/debug")).unwrap();
     fs::write(base.join("target/debug/binary"), "FINDME inside target").unwrap();
     fs::write(base.join("src.txt"), "FINDME in src").unwrap();
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "findme"}).to_string()).await.unwrap();
+    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "findme"}).to_string())
+        .await
+        .unwrap();
     let results = r["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0]["path"].as_str().unwrap().ends_with("src.txt"));
@@ -1685,7 +2016,9 @@ async fn s17_search_text_truncation() {
     for i in 0..(MAX_SEARCH_RESULTS + 10) {
         fs::write(base.join(format!("f{i:04}.txt")), "needle on this line").unwrap();
     }
-    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "needle"}).to_string()).await.unwrap();
+    let r = search_text(&json!({"root": base.to_str().unwrap(), "query": "needle"}).to_string())
+        .await
+        .unwrap();
     assert!(is_ok(&r));
     assert_eq!(r["truncated"], json!(true));
     assert_eq!(r["results"].as_array().unwrap().len(), MAX_SEARCH_RESULTS);

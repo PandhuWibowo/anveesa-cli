@@ -240,7 +240,13 @@ pub fn print_status(message: &str, is_tty: bool) {
     }
 }
 
-pub fn print_tool_result(summary: &str, ok: bool, elapsed_ms: u128, error: Option<&str>, is_tty: bool) {
+pub fn print_tool_result(
+    summary: &str,
+    ok: bool,
+    elapsed_ms: u128,
+    error: Option<&str>,
+    is_tty: bool,
+) {
     let elapsed = format_duration_ms(elapsed_ms);
     if is_tty {
         if ok {
@@ -565,11 +571,15 @@ pub fn print_help_inline(is_tty: bool) {
     println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
     println!("  \x1b[1;32m/status\x1b[0m             provider, model, turns, token usage");
     println!("  \x1b[1;32m/session\x1b[0m            show session file, age, and turn count");
-    println!("  \x1b[1;32m/export\x1b[0m \x1b[2m[path]\x1b[0m     save conversation to a markdown file");
+    println!(
+        "  \x1b[1;32m/export\x1b[0m \x1b[2m[path]\x1b[0m     save conversation to a markdown file"
+    );
     println!("  \x1b[1;32m/model\x1b[0m \x1b[2m[name]\x1b[0m      switch or show current model");
     println!("  \x1b[1;32m/provider\x1b[0m \x1b[2m[name]\x1b[0m   switch or show current provider");
     println!("  \x1b[1;32m/clear\x1b[0m              reset conversation and delete saved session");
-    println!("  \x1b[1;32m/attach\x1b[0m \x1b[2m[path]\x1b[0m     attach image from file or clipboard");
+    println!(
+        "  \x1b[1;32m/attach\x1b[0m \x1b[2m[path]\x1b[0m     attach image from file or clipboard"
+    );
     println!("  \x1b[1;32m/exit\x1b[0m, \x1b[1;32m/quit\x1b[0m       leave the session");
     println!("  \x1b[1;32m/help\x1b[0m               show this message");
     println!();
@@ -584,9 +594,13 @@ pub fn print_help_inline(is_tty: bool) {
     println!();
     println!("\x1b[2m  Images\x1b[0m");
     println!("\x1b[90m  ──────────────────────────────────────\x1b[0m");
-    println!("  \x1b[2mCtrl+V\x1b[0m to paste a clipboard image inline (shows \x1b[2m[📎]\x1b[0m indicator).");
+    println!(
+        "  \x1b[2mCtrl+V\x1b[0m to paste a clipboard image inline (shows \x1b[2m[📎]\x1b[0m indicator)."
+    );
     println!("  Or Cmd+C an image and send any message — it attaches automatically.");
-    println!("  Or use \x1b[1;32m/attach\x1b[0m \x1b[2mpath/to/file.png\x1b[0m for a specific file.");
+    println!(
+        "  Or use \x1b[1;32m/attach\x1b[0m \x1b[2mpath/to/file.png\x1b[0m for a specific file."
+    );
     println!("  For broadest clipboard support: \x1b[2mbrew install pngpaste\x1b[0m");
     println!();
 }
@@ -639,7 +653,10 @@ pub fn print_session_header(
 
     if !is_tty {
         let tag = if resumed {
-            format!(" (resumed · {turns} turns · {})", format_session_age(saved_at))
+            format!(
+                " (resumed · {turns} turns · {})",
+                format_session_age(saved_at)
+            )
         } else {
             String::new()
         };
@@ -670,7 +687,10 @@ pub fn print_session_header(
     }
 
     let greeting = if resumed {
-        format!(" · Resumed ({turns} turns · {})", format_session_age(saved_at))
+        format!(
+            " · Resumed ({turns} turns · {})",
+            format_session_age(saved_at)
+        )
     } else {
         String::new()
     };

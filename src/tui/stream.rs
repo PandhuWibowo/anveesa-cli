@@ -7,7 +7,7 @@ use crate::provider::{
     ChatMessage, DiffKind, ImageAttachment, PromptRequest, StreamEvent, ToolConfirmPreview,
 };
 
-use super::{App, Mode, Msg, PendingTool, PendingConfirm, TuiEvent};
+use super::{App, Mode, Msg, PendingConfirm, PendingTool, TuiEvent};
 
 pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
     if app.kbd.input_history.last().map(|s| s.as_str()) != Some(&text) {
@@ -54,10 +54,8 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
     let config = app.config.clone();
     let options = app.options.clone();
     let history = app.conv.history.clone();
-    let workspace_context = augmented_workspace_context(
-        app.workspace_context.as_deref(),
-        &app.conv.seen_paths,
-    );
+    let workspace_context =
+        augmented_workspace_context(app.workspace_context.as_deref(), &app.conv.seen_paths);
     let policy = app.policy;
     let mcp_arc = app.mcp.clone();
     let tui_tx = app.stream_tx.clone();
@@ -73,11 +71,14 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
             images,
             mcp: mcp_arc,
         };
-        let result = crate::provider::ask(&config, &provider_name, request, policy, &stream_tx_inner).await;
+        let result =
+            crate::provider::ask(&config, &provider_name, request, policy, &stream_tx_inner).await;
         drop(stream_tx_inner);
         match result {
             Ok(turn) => {
-                if let Some(m) = turn.model_used { let _ = tui_tx.send(TuiEvent::ModelUsed(m)); }
+                if let Some(m) = turn.model_used {
+                    let _ = tui_tx.send(TuiEvent::ModelUsed(m));
+                }
                 let _ = tui_tx.send(TuiEvent::Usage(turn.usage.unwrap_or_default()));
             }
             Err(e) => {
@@ -95,29 +96,60 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
                 StreamEvent::Status { message } => TuiEvent::Status(message),
                 StreamEvent::ToolCall { summary } => TuiEvent::ToolCall(summary),
                 StreamEvent::ToolResult { summary, ok, .. } => TuiEvent::ToolDone { summary, ok },
-                StreamEvent::FileOp { verb, path, added, removed, preview, .. } => {
-                    let diff = preview.into_iter().map(|dl| {
-                        let is_add = matches!(dl.kind, DiffKind::Add);
-                        (is_add, dl.text)
-                    }).collect();
-                    TuiEvent::FileOp { verb, path, added, removed, diff }
+                StreamEvent::FileOp {
+                    verb,
+                    path,
+                    added,
+                    removed,
+                    preview,
+                    ..
+                } => {
+                    let diff = preview
+                        .into_iter()
+                        .map(|dl| {
+                            let is_add = matches!(dl.kind, DiffKind::Add);
+                            (is_add, dl.text)
+                        })
+                        .collect();
+                    TuiEvent::FileOp {
+                        verb,
+                        path,
+                        added,
+                        removed,
+                        diff,
+                    }
                 }
                 StreamEvent::Confirm { preview, reply } => {
                     let (summary, diff) = match preview {
-                        ToolConfirmPreview::FileOp { verb, path, added, removed, diff, .. } => (
+                        ToolConfirmPreview::FileOp {
+                            verb,
+                            path,
+                            added,
+                            removed,
+                            diff,
+                            ..
+                        } => (
                             format!("{verb} {path}  +{added} -{removed}"),
-                            diff.into_iter().map(|dl| (matches!(dl.kind, DiffKind::Add), dl.text)).collect(),
+                            diff.into_iter()
+                                .map(|dl| (matches!(dl.kind, DiffKind::Add), dl.text))
+                                .collect(),
                         ),
                         ToolConfirmPreview::CreateDir { path } => (format!("mkdir {path}"), vec![]),
                         ToolConfirmPreview::Generic { summary } => (summary, vec![]),
                     };
-                    TuiEvent::Confirm { summary, diff, reply }
+                    TuiEvent::Confirm {
+                        summary,
+                        diff,
+                        reply,
+                    }
                 }
                 StreamEvent::Usage(u) => TuiEvent::Usage(u),
                 StreamEvent::PlanSet { tasks } => TuiEvent::PlanSet(tasks),
                 StreamEvent::PlanTaskDone { index } => TuiEvent::PlanTaskDone(index),
             };
-            if tui_tx2.send(tui_ev).is_err() { break; }
+            if tui_tx2.send(tui_ev).is_err() {
+                break;
+            }
         }
     });
 
@@ -132,10 +164,17 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             }
             if !app.live.thinking_buf.is_empty() {
                 let text = std::mem::take(&mut app.live.thinking_buf);
-                app.view.messages.push(Msg::Thinking { text, collapsed: true });
+                app.view.messages.push(Msg::Thinking {
+                    text,
+                    collapsed: true,
+                });
             }
             app.live.streaming_buf.push_str(&text);
-            if app.view.auto_scroll { app.view.scroll = usize::MAX; } else { app.live.unread_count += 1; }
+            if app.view.auto_scroll {
+                app.view.scroll = usize::MAX;
+            } else {
+                app.live.unread_count += 1;
+            }
         }
         TuiEvent::Thinking(text) => {
             if app.live.streaming_started_at.is_none() {
@@ -155,30 +194,59 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
         TuiEvent::ToolCall(summary) => {
             flush_streaming_buf(app);
             commit_pending_tool(app, true);
-            app.live.pending_tool = Some(PendingTool { summary: summary.clone() });
+            app.live.pending_tool = Some(PendingTool {
+                summary: summary.clone(),
+            });
             app.live.tool_started_at = Some(Instant::now());
             app.live.tool_status = summary;
         }
         TuiEvent::ToolDone { summary, ok } => {
-            let elapsed_ms = app.live.tool_started_at.take().map(|t| t.elapsed().as_millis());
+            let elapsed_ms = app
+                .live
+                .tool_started_at
+                .take()
+                .map(|t| t.elapsed().as_millis());
             record_seen_path(&mut app.conv.seen_paths, &summary);
             app.live.pending_tool = Some(PendingTool { summary });
             commit_pending_tool_timed(app, ok, elapsed_ms);
             app.live.tool_status = "Thinking".to_string();
         }
-        TuiEvent::FileOp { verb, path, added, removed, diff } => {
+        TuiEvent::FileOp {
+            verb,
+            path,
+            added,
+            removed,
+            diff,
+        } => {
             flush_streaming_buf(app);
             commit_pending_tool(app, true);
             let old_content = std::fs::read_to_string(&path).ok();
-            if app.conv.undo_stack.len() >= 20 { app.conv.undo_stack.remove(0); }
+            if app.conv.undo_stack.len() >= 20 {
+                app.conv.undo_stack.remove(0);
+            }
             app.conv.undo_stack.push((path.clone(), old_content));
             let collapsed = diff.len() > 8;
-            app.view.messages.push(Msg::FileOp { verb, path, added, removed, diff, collapsed });
+            app.view.messages.push(Msg::FileOp {
+                verb,
+                path,
+                added,
+                removed,
+                diff,
+                collapsed,
+            });
         }
-        TuiEvent::Confirm { summary, diff, reply } => {
+        TuiEvent::Confirm {
+            summary,
+            diff,
+            reply,
+        } => {
             flush_streaming_buf(app);
             commit_pending_tool(app, true);
-            app.confirm = Some(PendingConfirm { summary, diff, reply });
+            app.confirm = Some(PendingConfirm {
+                summary,
+                diff,
+                reply,
+            });
             app.mode = Mode::Confirming;
         }
         TuiEvent::Usage(u) => {
@@ -189,7 +257,10 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             app.usage.cache_write_tokens += u.cache_write_tokens;
             let (in_price, out_price, cr_price, cw_price) = {
                 // Check if active provider has custom pricing configured
-                let custom = app.options.provider.as_deref()
+                let custom = app
+                    .options
+                    .provider
+                    .as_deref()
                     .and_then(|p| app.config.providers.get(p))
                     .or_else(|| app.config.providers.get(&app.provider));
                 if let Some(crate::config::ProviderConfig::OpenAiCompatible(cfg)) = custom {
@@ -203,11 +274,13 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
                 }
             };
             app.session_cost_usd +=
-                (u.prompt_tokens as f64 - u.cache_read_tokens as f64 - u.cache_write_tokens as f64).max(0.0)
-                    * in_price / 1_000_000.0
-                + u.completion_tokens as f64 * out_price / 1_000_000.0
-                + u.cache_read_tokens as f64 * cr_price / 1_000_000.0
-                + u.cache_write_tokens as f64 * cw_price / 1_000_000.0;
+                (u.prompt_tokens as f64 - u.cache_read_tokens as f64 - u.cache_write_tokens as f64)
+                    .max(0.0)
+                    * in_price
+                    / 1_000_000.0
+                    + u.completion_tokens as f64 * out_price / 1_000_000.0
+                    + u.cache_read_tokens as f64 * cr_price / 1_000_000.0
+                    + u.cache_write_tokens as f64 * cw_price / 1_000_000.0;
             finish_turn(app);
         }
         TuiEvent::Error(msg) => {
@@ -221,7 +294,9 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             app.live.plan_tasks = tasks;
         }
         TuiEvent::PlanTaskDone(i) => {
-            if i < app.live.plan_done.len() { app.live.plan_done[i] = true; }
+            if i < app.live.plan_done.len() {
+                app.live.plan_done[i] = true;
+            }
         }
         TuiEvent::SetInput(text) => {
             app.kbd.input = text;
@@ -236,7 +311,9 @@ fn record_seen_path(seen: &mut std::collections::BTreeSet<String>, summary: &str
     for prefix in &["read file ", "list directory "] {
         if let Some(path) = summary.strip_prefix(prefix) {
             let path = path.trim().to_string();
-            if !path.is_empty() { seen.insert(path); }
+            if !path.is_empty() {
+                seen.insert(path);
+            }
             return;
         }
     }
@@ -251,7 +328,10 @@ fn augmented_workspace_context(
     }
     let seen_note = format!(
         "\nAlready inspected this session (do NOT re-read these):\n{}",
-        seen.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n")
+        seen.iter()
+            .map(|p| format!("  - {p}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     Some(match base {
         Some(b) => format!("{b}{seen_note}"),
@@ -268,13 +348,22 @@ pub(super) fn flush_streaming_buf(app: &mut App) {
 }
 
 pub(super) fn commit_pending_tool(app: &mut App, ok: bool) {
-    let elapsed = app.live.tool_started_at.take().map(|t| t.elapsed().as_millis());
+    let elapsed = app
+        .live
+        .tool_started_at
+        .take()
+        .map(|t| t.elapsed().as_millis());
     commit_pending_tool_timed(app, ok, elapsed);
 }
 
 pub(super) fn commit_pending_tool_timed(app: &mut App, ok: bool, elapsed_ms: Option<u128>) {
     if let Some(tool) = app.live.pending_tool.take() {
-        app.view.messages.push(Msg::Tool { done: true, ok, text: tool.summary, elapsed_ms });
+        app.view.messages.push(Msg::Tool {
+            done: true,
+            ok,
+            text: tool.summary,
+            elapsed_ms,
+        });
     }
 }
 
@@ -282,7 +371,10 @@ pub(super) fn finish_turn(app: &mut App) {
     commit_pending_tool(app, true);
     if !app.live.thinking_buf.is_empty() {
         let text = std::mem::take(&mut app.live.thinking_buf);
-        app.view.messages.push(Msg::Thinking { text, collapsed: true });
+        app.view.messages.push(Msg::Thinking {
+            text,
+            collapsed: true,
+        });
     }
     flush_streaming_buf(app);
     let response = std::mem::take(&mut app.live.accumulated_response);
@@ -293,7 +385,11 @@ pub(super) fn finish_turn(app: &mut App) {
         if let Some(path) = &app.conv.session_path {
             if let Ok(cwd) = std::env::current_dir() {
                 let _ = crate::session::save_interactive_session(
-                    path, &cwd, &app.provider, &app.options, &app.conv.history,
+                    path,
+                    &cwd,
+                    &app.provider,
+                    &app.options,
+                    &app.conv.history,
                 );
                 app.conv.last_saved_at = crate::unix_now();
             }
@@ -325,10 +421,13 @@ fn auto_compact_if_needed(app: &mut App) {
     let drop_msgs = drop_turns * 2;
     app.conv.history.drain(..drop_msgs);
     app.conv.seen_paths.clear();
-    app.conv.history.insert(0, ChatMessage::user(format!(
-        "[Context note: {drop_turns} earlier turn(s) were auto-compacted. \
+    app.conv.history.insert(
+        0,
+        ChatMessage::user(format!(
+            "[Context note: {drop_turns} earlier turn(s) were auto-compacted. \
          Use read_file / list_dir to re-inspect any files if needed.]"
-    )));
+        )),
+    );
     app.view.messages.push(Msg::System(format!(
         "Auto-compacted: dropped {drop_turns} older turn(s) (~{}k est. tokens). Use /compact for manual control.",
         estimated / 1000

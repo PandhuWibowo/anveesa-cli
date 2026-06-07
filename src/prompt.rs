@@ -297,7 +297,7 @@ pub fn read_prompt_line(
 
     // History navigation state.
     let mut hist_idx: Option<usize> = None; // None = current live input
-    let mut saved_input = String::new();    // stash live input when navigating into history
+    let mut saved_input = String::new(); // stash live input when navigating into history
 
     // Compose the visible prompt label, optionally prefixed with an image indicator.
     let effective_label = |img: &Option<ImageAttachment>| -> String {
@@ -418,18 +418,14 @@ pub fn read_prompt_line(
                     b"[C" => {
                         // Right arrow
                         buffer.move_right();
-                        let _ = position_prompt_cursor(
-                            &buffer.display,
-                            buffer.display_cursor_char(),
-                        );
+                        let _ =
+                            position_prompt_cursor(&buffer.display, buffer.display_cursor_char());
                     }
                     b"[D" => {
                         // Left arrow
                         buffer.move_left();
-                        let _ = position_prompt_cursor(
-                            &buffer.display,
-                            buffer.display_cursor_char(),
-                        );
+                        let _ =
+                            position_prompt_cursor(&buffer.display, buffer.display_cursor_char());
                     }
                     b"[H" | b"[1~" => {
                         // Home
@@ -439,10 +435,8 @@ pub fn read_prompt_line(
                     b"[F" | b"[4~" => {
                         // End
                         buffer.move_end();
-                        let _ = position_prompt_cursor(
-                            &buffer.display,
-                            buffer.display_cursor_char(),
-                        );
+                        let _ =
+                            position_prompt_cursor(&buffer.display, buffer.display_cursor_char());
                     }
                     _ => {}
                 }
@@ -562,7 +556,11 @@ pub fn pasted_text_display_placeholder(paste_count: usize, line_count: usize) ->
     format!("[Pasted text #{paste_count} +{line_count} lines]")
 }
 
-pub fn input_screen_rows(input: &str, terminal_width: usize, first_row_prefix_width: usize) -> usize {
+pub fn input_screen_rows(
+    input: &str,
+    terminal_width: usize,
+    first_row_prefix_width: usize,
+) -> usize {
     let width = terminal_width.max(1);
 
     input

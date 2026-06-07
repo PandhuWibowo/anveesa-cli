@@ -4,12 +4,16 @@ mod input;
 mod render;
 mod stream;
 
-use std::{collections::BTreeSet, path::PathBuf, time::{Duration, Instant}};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
@@ -17,15 +21,15 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     cli::AskOptions,
     config::AppConfig,
-    provider::{
-        ApprovalDecision, ApprovalPolicy, ChatMessage, ChatRole, ImageAttachment, Usage,
-    },
+    provider::{ApprovalDecision, ApprovalPolicy, ChatMessage, ChatRole, ImageAttachment, Usage},
 };
 
-use self::format::{delete_word_before, move_cursor_left, move_cursor_right, next_char_len, prev_char_len};
-use self::render::{render, set_mouse_capture};
 use self::commands::handle_slash_command;
+use self::format::{
+    delete_word_before, move_cursor_left, move_cursor_right, next_char_len, prev_char_len,
+};
 use self::input::{tab_complete, update_search};
+use self::render::{render, set_mouse_capture};
 use self::stream::{handle_stream_event, submit_prompt};
 
 // ── Public stream event type ──────────────────────────────────────────────────
@@ -35,9 +39,22 @@ pub enum TuiEvent {
     Thinking(String),
     Status(String),
     ToolCall(String),
-    ToolDone { summary: String, ok: bool },
-    FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)> },
-    Confirm { summary: String, diff: Vec<(bool, String)>, reply: oneshot::Sender<ApprovalDecision> },
+    ToolDone {
+        summary: String,
+        ok: bool,
+    },
+    FileOp {
+        verb: String,
+        path: String,
+        added: usize,
+        removed: usize,
+        diff: Vec<(bool, String)>,
+    },
+    Confirm {
+        summary: String,
+        diff: Vec<(bool, String)>,
+        reply: oneshot::Sender<ApprovalDecision>,
+    },
     Usage(Usage),
     ModelUsed(String),
     SystemMsg(String),
@@ -51,11 +68,30 @@ pub enum TuiEvent {
 
 #[derive(Debug)]
 enum Msg {
-    User { text: String },
-    Assistant { text: String },
-    Tool { done: bool, ok: bool, text: String, elapsed_ms: Option<u128> },
-    FileOp { verb: String, path: String, added: usize, removed: usize, diff: Vec<(bool, String)>, collapsed: bool },
-    Thinking { text: String, collapsed: bool },
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+    },
+    Tool {
+        done: bool,
+        ok: bool,
+        text: String,
+        elapsed_ms: Option<u128>,
+    },
+    FileOp {
+        verb: String,
+        path: String,
+        added: usize,
+        removed: usize,
+        diff: Vec<(bool, String)>,
+        collapsed: bool,
+    },
+    Thinking {
+        text: String,
+        collapsed: bool,
+    },
     Error(String),
     System(String),
     Separator, // thin line between turns — "AI is done, your turn"
@@ -189,8 +225,12 @@ impl App {
         let messages = history
             .iter()
             .map(|m| match m.role {
-                ChatRole::User => Msg::User { text: m.content.clone() },
-                ChatRole::Assistant => Msg::Assistant { text: m.content.clone() },
+                ChatRole::User => Msg::User {
+                    text: m.content.clone(),
+                },
+                ChatRole::Assistant => Msg::Assistant {
+                    text: m.content.clone(),
+                },
             })
             .collect();
 
@@ -313,7 +353,9 @@ async fn handle_event(app: &mut App, event: Event) -> Result<()> {
         Event::Key(key) => handle_key(app, key).await?,
         // Cmd+V / terminal paste — insert text, or attach image if paste is empty
         Event::Paste(text) => {
-            if app.mode != Mode::Input { return Ok(()); }
+            if app.mode != Mode::Input {
+                return Ok(());
+            }
             if text.trim().is_empty() {
                 if app.images_available {
                     if let Some(img) = crate::image::grab_clipboard_image() {
@@ -353,7 +395,12 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind) {
     }
 }
 
-async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -> Result<()> {
+async fn handle_key(
+    app: &mut App,
+    KeyEvent {
+        code, modifiers, ..
+    }: KeyEvent,
+) -> Result<()> {
     // ── Confirming mode: y/a/n only ───────────────────────────────────────────
     if app.mode == Mode::Confirming {
         if let Some(confirm) = app.confirm.take() {
@@ -396,8 +443,7 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
                 app.view.search_query.clear();
                 app.view.search_results.clear();
             }
-            KeyCode::Enter | KeyCode::Down
-            | KeyCode::Char('n') => {
+            KeyCode::Enter | KeyCode::Down | KeyCode::Char('n') => {
                 if !app.view.search_results.is_empty() {
                     app.view.search_idx = (app.view.search_idx + 1) % app.view.search_results.len();
                     let idx = app.view.search_results[app.view.search_idx];
@@ -408,7 +454,11 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
             }
             KeyCode::Up | KeyCode::Char('p') => {
                 if !app.view.search_results.is_empty() {
-                    app.view.search_idx = app.view.search_idx.checked_sub(1).unwrap_or(app.view.search_results.len() - 1);
+                    app.view.search_idx = app
+                        .view
+                        .search_idx
+                        .checked_sub(1)
+                        .unwrap_or(app.view.search_results.len() - 1);
                     let idx = app.view.search_results[app.view.search_idx];
                     if let Some(&off) = app.view.msg_line_offsets.get(idx) {
                         app.view.scroll = off.saturating_sub(2);
@@ -442,20 +492,29 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
 
         KeyCode::Char('[') if app.kbd.input.is_empty() => {
             let cur = app.view.msg_focus.unwrap_or(app.view.messages.len());
-            let prev = app.view.messages[..cur].iter().rposition(|m| matches!(m, Msg::FileOp { .. } | Msg::Thinking { .. }));
+            let prev = app.view.messages[..cur]
+                .iter()
+                .rposition(|m| matches!(m, Msg::FileOp { .. } | Msg::Thinking { .. }));
             if let Some(idx) = prev {
                 app.view.msg_focus = Some(idx);
                 app.view.auto_scroll = false;
-                if let Some(&off) = app.view.msg_line_offsets.get(idx) { app.view.scroll = off.saturating_sub(2); }
+                if let Some(&off) = app.view.msg_line_offsets.get(idx) {
+                    app.view.scroll = off.saturating_sub(2);
+                }
             }
         }
         KeyCode::Char(']') if app.kbd.input.is_empty() => {
             let start = app.view.msg_focus.map(|i| i + 1).unwrap_or(0);
-            let next = app.view.messages[start..].iter().position(|m| matches!(m, Msg::FileOp { .. } | Msg::Thinking { .. })).map(|i| start + i);
+            let next = app.view.messages[start..]
+                .iter()
+                .position(|m| matches!(m, Msg::FileOp { .. } | Msg::Thinking { .. }))
+                .map(|i| start + i);
             if let Some(idx) = next {
                 app.view.msg_focus = Some(idx);
                 app.view.auto_scroll = false;
-                if let Some(&off) = app.view.msg_line_offsets.get(idx) { app.view.scroll = off.saturating_sub(2); }
+                if let Some(&off) = app.view.msg_line_offsets.get(idx) {
+                    app.view.scroll = off.saturating_sub(2);
+                }
             }
         }
         KeyCode::Esc if app.view.msg_focus.is_some() => {
@@ -494,7 +553,9 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
                 app.kbd.hist_idx = None;
             }
         }
-        KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) && app.kbd.input.is_empty() => {
+        KeyCode::Char('d')
+            if modifiers.contains(KeyModifiers::CONTROL) && app.kbd.input.is_empty() =>
+        {
             app.quit = true;
         }
         KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -558,7 +619,9 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
         KeyCode::Delete => {
             if app.kbd.input_cursor < app.kbd.input.len() {
                 let len = next_char_len(&app.kbd.input, app.kbd.input_cursor);
-                app.kbd.input.drain(app.kbd.input_cursor..app.kbd.input_cursor + len);
+                app.kbd
+                    .input
+                    .drain(app.kbd.input_cursor..app.kbd.input_cursor + len);
                 app.kbd.hist_idx = None;
                 app.kbd.tab_state = None;
             }
@@ -586,21 +649,19 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
                 app.kbd.input_cursor = app.kbd.input.len();
             }
         }
-        KeyCode::Down => {
-            match app.kbd.hist_idx {
-                None => {}
-                Some(i) if i + 1 >= app.kbd.input_history.len() => {
-                    app.kbd.hist_idx = None;
-                    app.kbd.input = std::mem::take(&mut app.kbd.hist_saved);
-                    app.kbd.input_cursor = app.kbd.input.len();
-                }
-                Some(i) => {
-                    app.kbd.hist_idx = Some(i + 1);
-                    app.kbd.input = app.kbd.input_history[i + 1].clone();
-                    app.kbd.input_cursor = app.kbd.input.len();
-                }
+        KeyCode::Down => match app.kbd.hist_idx {
+            None => {}
+            Some(i) if i + 1 >= app.kbd.input_history.len() => {
+                app.kbd.hist_idx = None;
+                app.kbd.input = std::mem::take(&mut app.kbd.hist_saved);
+                app.kbd.input_cursor = app.kbd.input.len();
             }
-        }
+            Some(i) => {
+                app.kbd.hist_idx = Some(i + 1);
+                app.kbd.input = app.kbd.input_history[i + 1].clone();
+                app.kbd.input_cursor = app.kbd.input.len();
+            }
+        },
 
         // Scroll
         KeyCode::PageUp => {
@@ -617,8 +678,12 @@ async fn handle_key(app: &mut App, KeyEvent { code, modifiers, .. }: KeyEvent) -
         // j/k vim-style scroll when input is empty
         KeyCode::Char('j') if app.kbd.input.is_empty() => {
             app.view.scroll = app.view.scroll.saturating_add(3);
-            if app.view.scroll >= app.view.total_lines { app.view.auto_scroll = true; app.live.unread_count = 0; }
-            else { app.view.auto_scroll = false; }
+            if app.view.scroll >= app.view.total_lines {
+                app.view.auto_scroll = true;
+                app.live.unread_count = 0;
+            } else {
+                app.view.auto_scroll = false;
+            }
         }
         KeyCode::Char('k') if app.kbd.input.is_empty() => {
             app.view.auto_scroll = false;

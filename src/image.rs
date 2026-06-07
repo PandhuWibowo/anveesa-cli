@@ -289,19 +289,23 @@ pub fn read_clipboard_text() -> Option<String> {
         let out = std::process::Command::new("pbpaste").output().ok()?;
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
-            if !text.is_empty() { return Some(text); }
+            if !text.is_empty() {
+                return Some(text);
+            }
         }
     }
     #[cfg(not(target_os = "macos"))]
     for (cmd, args) in &[
         ("wl-paste", vec!["--no-newline"]),
-        ("xclip",   vec!["-o", "-selection", "clipboard"]),
-        ("xsel",    vec!["--clipboard", "--output"]),
+        ("xclip", vec!["-o", "-selection", "clipboard"]),
+        ("xsel", vec!["--clipboard", "--output"]),
     ] {
         if let Ok(out) = std::process::Command::new(cmd).args(args).output() {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout).into_owned();
-                if !text.is_empty() { return Some(text); }
+                if !text.is_empty() {
+                    return Some(text);
+                }
             }
         }
     }

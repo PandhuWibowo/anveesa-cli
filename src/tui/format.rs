@@ -4,10 +4,15 @@ use ratatui::{
 };
 
 pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 { return vec![text.to_string()]; }
+    if width == 0 {
+        return vec![text.to_string()];
+    }
     let mut out = Vec::new();
     for line in text.lines() {
-        if line.is_empty() { out.push(String::new()); continue; }
+        if line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
         let mut current = String::new();
         let mut col = 0usize;
         for word in line.split_whitespace() {
@@ -17,7 +22,10 @@ pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
                 current.clear();
                 col = 0;
             }
-            if col > 0 { current.push(' '); col += 1; }
+            if col > 0 {
+                current.push(' ');
+                col += 1;
+            }
             current.push_str(word);
             col += wlen;
         }
@@ -43,7 +51,11 @@ pub(super) fn format_assistant_lines(text: &str, width: usize) -> Vec<Line<'stat
             } else {
                 in_code = true;
                 code_lang = raw[3..].trim().to_string();
-                let lang = if code_lang.is_empty() { String::new() } else { format!(" {} ", code_lang) };
+                let lang = if code_lang.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {} ", code_lang)
+                };
                 out.push(Line::from(Span::styled(
                     format!("    ┌─{lang}"),
                     Style::default().fg(Color::Rgb(50, 50, 70)),
@@ -69,32 +81,41 @@ pub(super) fn format_assistant_lines(text: &str, width: usize) -> Vec<Line<'stat
 }
 
 fn format_prose_line(line: &str) -> Line<'static> {
-    if line.is_empty() { return Line::from(""); }
+    if line.is_empty() {
+        return Line::from("");
+    }
 
     if line.starts_with("### ") {
         return Line::from(Span::styled(
             format!("    {}", &line[4..]),
-            Style::default().fg(Color::Rgb(198, 160, 246)).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Rgb(198, 160, 246))
+                .add_modifier(Modifier::BOLD),
         ));
     }
     if line.starts_with("## ") {
         return Line::from(Span::styled(
             format!("    {}", &line[3..]),
-            Style::default().fg(Color::Rgb(198, 160, 246)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            Style::default()
+                .fg(Color::Rgb(198, 160, 246))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         ));
     }
     if line.starts_with("# ") {
         return Line::from(Span::styled(
             format!("    {}", &line[2..]),
-            Style::default().fg(Color::Rgb(198, 160, 246)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            Style::default()
+                .fg(Color::Rgb(198, 160, 246))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         ));
     }
 
-    let (prefix, rest) = if let Some(s) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-        ("    • ", s)
-    } else {
-        ("    ", line)
-    };
+    let (prefix, rest) =
+        if let Some(s) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            ("    • ", s)
+        } else {
+            ("    ", line)
+        };
 
     Line::from(parse_inline(&format!("{prefix}{rest}")))
 }
@@ -106,50 +127,143 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
 
     while let Some(c) = chars.next() {
         if c == '`' {
-            if !buf.is_empty() { spans.push(Span::raw(buf.clone())); buf.clear(); }
+            if !buf.is_empty() {
+                spans.push(Span::raw(buf.clone()));
+                buf.clear();
+            }
             let mut code = String::new();
-            for ch in chars.by_ref() { if ch == '`' { break; } code.push(ch); }
-            spans.push(Span::styled(code, Style::default().fg(Color::Rgb(229, 192, 123)).bg(Color::Rgb(40, 40, 55))));
+            for ch in chars.by_ref() {
+                if ch == '`' {
+                    break;
+                }
+                code.push(ch);
+            }
+            spans.push(Span::styled(
+                code,
+                Style::default()
+                    .fg(Color::Rgb(229, 192, 123))
+                    .bg(Color::Rgb(40, 40, 55)),
+            ));
         } else if c == '*' && chars.peek() == Some(&'*') {
             chars.next();
-            if !buf.is_empty() { spans.push(Span::raw(buf.clone())); buf.clear(); }
+            if !buf.is_empty() {
+                spans.push(Span::raw(buf.clone()));
+                buf.clear();
+            }
             let mut bold = String::new();
             loop {
                 match chars.next() {
-                    Some('*') if chars.peek() == Some(&'*') => { chars.next(); break; }
+                    Some('*') if chars.peek() == Some(&'*') => {
+                        chars.next();
+                        break;
+                    }
                     Some(ch) => bold.push(ch),
                     None => break,
                 }
             }
-            spans.push(Span::styled(bold, Style::default().add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                bold,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
         } else if c == '*' {
-            if !buf.is_empty() { spans.push(Span::raw(buf.clone())); buf.clear(); }
+            if !buf.is_empty() {
+                spans.push(Span::raw(buf.clone()));
+                buf.clear();
+            }
             let mut italic = String::new();
-            for ch in chars.by_ref() { if ch == '*' { break; } italic.push(ch); }
-            spans.push(Span::styled(italic, Style::default().add_modifier(Modifier::ITALIC)));
+            for ch in chars.by_ref() {
+                if ch == '*' {
+                    break;
+                }
+                italic.push(ch);
+            }
+            spans.push(Span::styled(
+                italic,
+                Style::default().add_modifier(Modifier::ITALIC),
+            ));
         } else {
             buf.push(c);
         }
     }
-    if !buf.is_empty() { spans.push(Span::raw(buf)); }
+    if !buf.is_empty() {
+        spans.push(Span::raw(buf));
+    }
     spans
 }
 
 fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
     static KEYWORDS: &[&str] = &[
-        "fn", "let", "mut", "const", "struct", "enum", "impl", "trait", "use", "pub",
-        "mod", "return", "if", "else", "for", "while", "loop", "match", "async", "await",
-        "self", "Self", "true", "false", "Some", "None", "Ok", "Err", "type", "where",
-        "def", "class", "import", "from", "pass", "with", "as", "in", "not", "and", "or",
-        "var", "function", "new", "this", "typeof", "instanceof", "yield", "break", "continue",
-        "int", "str", "bool", "float", "None", "True", "False", "null", "undefined",
-        "interface", "extends", "implements", "static", "final", "void", "package",
+        "fn",
+        "let",
+        "mut",
+        "const",
+        "struct",
+        "enum",
+        "impl",
+        "trait",
+        "use",
+        "pub",
+        "mod",
+        "return",
+        "if",
+        "else",
+        "for",
+        "while",
+        "loop",
+        "match",
+        "async",
+        "await",
+        "self",
+        "Self",
+        "true",
+        "false",
+        "Some",
+        "None",
+        "Ok",
+        "Err",
+        "type",
+        "where",
+        "def",
+        "class",
+        "import",
+        "from",
+        "pass",
+        "with",
+        "as",
+        "in",
+        "not",
+        "and",
+        "or",
+        "var",
+        "function",
+        "new",
+        "this",
+        "typeof",
+        "instanceof",
+        "yield",
+        "break",
+        "continue",
+        "int",
+        "str",
+        "bool",
+        "float",
+        "None",
+        "True",
+        "False",
+        "null",
+        "undefined",
+        "interface",
+        "extends",
+        "implements",
+        "static",
+        "final",
+        "void",
+        "package",
     ];
 
     let bg = Color::Rgb(28, 28, 40);
-    let mut spans: Vec<Span<'static>> = vec![
-        Span::styled("      ".to_string(), Style::default().bg(bg)),
-    ];
+    let mut spans: Vec<Span<'static>> =
+        vec![Span::styled("      ".to_string(), Style::default().bg(bg))];
 
     let mut chars = line.chars().peekable();
     let mut buf = String::new();
@@ -157,7 +271,9 @@ fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
     let mut string_char = '"';
 
     let flush = |buf: &mut String, spans: &mut Vec<Span<'static>>| {
-        if buf.is_empty() { return; }
+        if buf.is_empty() {
+            return;
+        }
         let s = buf.clone();
         let style = if KEYWORDS.contains(&s.as_str()) {
             Style::default().fg(Color::Rgb(198, 120, 221)).bg(bg)
@@ -173,7 +289,10 @@ fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
             buf.push(c);
             if c == string_char {
                 let s = buf.clone();
-                spans.push(Span::styled(s, Style::default().fg(Color::Rgb(152, 195, 121)).bg(bg)));
+                spans.push(Span::styled(
+                    s,
+                    Style::default().fg(Color::Rgb(152, 195, 121)).bg(bg),
+                ));
                 buf.clear();
                 in_string = false;
             }
@@ -184,7 +303,10 @@ fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
         if (c == '/' && chars.peek() == Some(&'/')) || c == '#' {
             flush(&mut buf, &mut spans);
             let rest: String = std::iter::once(c).chain(chars.by_ref()).collect();
-            spans.push(Span::styled(rest, Style::default().fg(Color::Rgb(92, 99, 112)).bg(bg)));
+            spans.push(Span::styled(
+                rest,
+                Style::default().fg(Color::Rgb(92, 99, 112)).bg(bg),
+            ));
             break;
         }
 
@@ -202,10 +324,17 @@ fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
             flush(&mut buf, &mut spans);
             let mut num = c.to_string();
             while let Some(&n) = chars.peek() {
-                if n.is_ascii_alphanumeric() || n == '.' || n == '_' { num.push(n); chars.next(); }
-                else { break; }
+                if n.is_ascii_alphanumeric() || n == '.' || n == '_' {
+                    num.push(n);
+                    chars.next();
+                } else {
+                    break;
+                }
             }
-            spans.push(Span::styled(num, Style::default().fg(Color::Rgb(209, 154, 102)).bg(bg)));
+            spans.push(Span::styled(
+                num,
+                Style::default().fg(Color::Rgb(209, 154, 102)).bg(bg),
+            ));
             continue;
         }
 
@@ -213,7 +342,10 @@ fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
             buf.push(c);
         } else {
             flush(&mut buf, &mut spans);
-            spans.push(Span::styled(c.to_string(), Style::default().fg(Color::Rgb(171, 178, 191)).bg(bg)));
+            spans.push(Span::styled(
+                c.to_string(),
+                Style::default().fg(Color::Rgb(171, 178, 191)).bg(bg),
+            ));
         }
     }
     flush(&mut buf, &mut spans);
@@ -221,7 +353,10 @@ fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
     // Fill remainder with bg color
     let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     if content_len < 84 {
-        spans.push(Span::styled(" ".repeat(84 - content_len), Style::default().bg(bg)));
+        spans.push(Span::styled(
+            " ".repeat(84 - content_len),
+            Style::default().bg(bg),
+        ));
     }
 
     Line::from(spans)
@@ -230,7 +365,11 @@ fn highlight_code_line(line: &str, _lang: &str) -> Line<'static> {
 // ── String/cursor helpers ─────────────────────────────────────────────────────
 
 pub(super) fn prev_char_len(s: &str, pos: usize) -> usize {
-    s[..pos].chars().next_back().map(|c| c.len_utf8()).unwrap_or(0)
+    s[..pos]
+        .chars()
+        .next_back()
+        .map(|c| c.len_utf8())
+        .unwrap_or(0)
 }
 
 pub(super) fn next_char_len(s: &str, pos: usize) -> usize {

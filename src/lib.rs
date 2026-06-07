@@ -28,16 +28,13 @@ use crate::{
         set_default_provider,
     },
     display::{
-        render_stream, print_session_header, print_help_inline, print_session_info,
-        print_status_inline, prompt_label, print_input_separator, term_width,
+        print_help_inline, print_input_separator, print_session_header, print_session_info,
+        print_status_inline, prompt_label, render_stream, term_width,
     },
-    image::{
-        attach_image, grab_clipboard_image, image_fingerprint, parse_attach_command,
-    },
+    image::{attach_image, grab_clipboard_image, image_fingerprint, parse_attach_command},
     prompt::{PromptRead, read_prompt_line},
     provider::{
-        ApprovalPolicy, ChatMessage, ChatRole, ImageAttachment,
-        PromptRequest, TurnResult, Usage,
+        ApprovalPolicy, ChatMessage, ChatRole, ImageAttachment, PromptRequest, TurnResult, Usage,
     },
     session::{
         append_repl_history, legacy_session_path, load_interactive_session, purge_stale_sessions,
@@ -124,10 +121,16 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             let _ = fs::remove_file(&legacy);
             Some(session)
         });
-    let mut history = loaded_session.as_ref().map(|s| s.messages.clone()).unwrap_or_default();
+    let mut history = loaded_session
+        .as_ref()
+        .map(|s| s.messages.clone())
+        .unwrap_or_default();
     // saved_at at load time — used only for the startup header so it shows when the previous
     // run ended, not the current run's save time.
-    let session_saved_at = loaded_session.as_ref().filter(|s| s.saved_at > 0).map(|s| s.saved_at);
+    let session_saved_at = loaded_session
+        .as_ref()
+        .filter(|s| s.saved_at > 0)
+        .map(|s| s.saved_at);
     // tracks the most recent successful save this run — kept fresh for /session display
     let mut last_saved_at: u64 = session_saved_at.unwrap_or(0);
     // Per-project config: .anveesa.toml (extended) or .anveesa (plain system prompt)
@@ -164,7 +167,12 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
     let input_history: Vec<String> = history_path
         .as_deref()
         .and_then(|p| fs::read_to_string(p).ok())
-        .map(|c| c.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+        .map(|c| {
+            c.lines()
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
 
     print_session_header(
@@ -192,7 +200,11 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         tokio::task::spawn_blocking(move || {
             loop {
                 match crossterm::event::read() {
-                    Ok(ev) => { if key_tx.send(ev).is_err() { break; } }
+                    Ok(ev) => {
+                        if key_tx.send(ev).is_err() {
+                            break;
+                        }
+                    }
                     Err(_) => break,
                 }
             }
@@ -204,7 +216,10 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
 
         let app = tui::App::new(
             provider_name.clone(),
-            session_options.model.clone().unwrap_or_else(|| "-".to_string()),
+            session_options
+                .model
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
             short_cwd,
             history,
             images_available,
@@ -234,16 +249,21 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
 
     loop {
         print_input_separator(is_tty, width);
-        let (line, ctrl_v_image) =
-            match read_prompt_line(&label, width, &mut paste_count, images_available, &input_history) {
-                Ok(PromptRead::Line(line, img)) => (line, img),
-                Ok(PromptRead::Interrupted) => continue,
-                Ok(PromptRead::Eof) => {
-                    println!();
-                    break;
-                }
-                Err(error) => return Err(error).context("failed to read interactive prompt"),
-            };
+        let (line, ctrl_v_image) = match read_prompt_line(
+            &label,
+            width,
+            &mut paste_count,
+            images_available,
+            &input_history,
+        ) {
+            Ok(PromptRead::Line(line, img)) => (line, img),
+            Ok(PromptRead::Interrupted) => continue,
+            Ok(PromptRead::Eof) => {
+                println!();
+                break;
+            }
+            Err(error) => return Err(error).context("failed to read interactive prompt"),
+        };
 
         // Ctrl+V image takes precedence over a previously pending image.
         if let Some(img) = ctrl_v_image {
@@ -321,7 +341,10 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
             s if s.starts_with("/model") => {
                 let arg = s.strip_prefix("/model").unwrap().trim();
                 if arg.is_empty() {
-                    let current = session_options.model.as_deref().unwrap_or("(provider default)");
+                    let current = session_options
+                        .model
+                        .as_deref()
+                        .unwrap_or("(provider default)");
                     if is_tty {
                         println!("\x1b[2m  model: {current}\x1b[0m");
                     } else {
@@ -341,14 +364,18 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 let arg = s.strip_prefix("/provider").unwrap().trim();
                 if arg.is_empty() {
                     if is_tty {
-                        println!("\x1b[2m  provider: {provider_name}  model: {}\x1b[0m",
-                            session_options.model.as_deref().unwrap_or("(default)"));
+                        println!(
+                            "\x1b[2m  provider: {provider_name}  model: {}\x1b[0m",
+                            session_options.model.as_deref().unwrap_or("(default)")
+                        );
                     } else {
                         println!("provider: {provider_name}");
                     }
                 } else if !config.providers.contains_key(arg) {
                     if is_tty {
-                        eprintln!("\x1b[1;31m✗\x1b[0m unknown provider '{arg}' — run: anveesa providers");
+                        eprintln!(
+                            "\x1b[1;31m✗\x1b[0m unknown provider '{arg}' — run: anveesa providers"
+                        );
                     } else {
                         eprintln!("error: unknown provider '{arg}'");
                     }
@@ -361,7 +388,9 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                     session_options.provider = Some(arg.to_string());
                     let model_display = session_options.model.as_deref().unwrap_or("(default)");
                     if is_tty {
-                        println!("\x1b[2m  Switched to provider: {arg}  model: {model_display}\x1b[0m");
+                        println!(
+                            "\x1b[2m  Switched to provider: {arg}  model: {model_display}\x1b[0m"
+                        );
                     } else {
                         println!("switched provider: {arg}  model: {model_display}");
                     }
@@ -373,7 +402,9 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
         if let Some(path) = parse_attach_command(&prompt) {
             if !images_available {
                 if is_tty {
-                    eprintln!("\x1b[1;31m✗\x1b[0m image attachments require an openai-compatible provider");
+                    eprintln!(
+                        "\x1b[1;31m✗\x1b[0m image attachments require an openai-compatible provider"
+                    );
                 } else {
                     eprintln!("error: image attachments require an openai-compatible provider");
                 }
@@ -452,7 +483,15 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                 history.push(ChatMessage::user(prompt));
                 history.push(ChatMessage::assistant(result.text));
                 if let Some(path) = &session_path {
-                    if save_interactive_session(path, &cwd, &provider_name, &session_options, &history).is_ok() {
+                    if save_interactive_session(
+                        path,
+                        &cwd,
+                        &provider_name,
+                        &session_options,
+                        &history,
+                    )
+                    .is_ok()
+                    {
                         last_saved_at = unix_now();
                     }
                 }
@@ -469,7 +508,15 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                     "The previous turn failed inside Anveesa before a final answer was produced: {error:#}"
                 )));
                 if let Some(path) = &session_path {
-                    if save_interactive_session(path, &cwd, &provider_name, &session_options, &history).is_ok() {
+                    if save_interactive_session(
+                        path,
+                        &cwd,
+                        &provider_name,
+                        &session_options,
+                        &history,
+                    )
+                    .is_ok()
+                    {
                         last_saved_at = unix_now();
                     }
                 }
@@ -483,7 +530,13 @@ async fn run_interactive(options: AskOptions) -> Result<()> {
                     eprintln!("interrupted");
                 }
                 if let Some(path) = &session_path {
-                    let _ = save_interactive_session(path, &cwd, &provider_name, &session_options, &history);
+                    let _ = save_interactive_session(
+                        path,
+                        &cwd,
+                        &provider_name,
+                        &session_options,
+                        &history,
+                    );
                 }
                 break;
             }
@@ -579,8 +632,7 @@ pub fn export_conversation(path: &std::path::Path, history: &[ChatMessage]) -> R
             }
         }
     }
-    fs::write(path, out.trim_end())
-        .with_context(|| format!("failed to write {}", path.display()))
+    fs::write(path, out.trim_end()).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn list_providers() -> Result<()> {
@@ -591,7 +643,11 @@ fn list_providers() -> Result<()> {
         for (name, provider) in &config.providers {
             let is_default = config.default_provider.as_deref() == Some(name.as_str());
             let model = provider.default_model().unwrap_or("-");
-            println!("{}  {name}  {model}  {}", if is_default { "*" } else { " " }, provider.kind());
+            println!(
+                "{}  {name}  {model}  {}",
+                if is_default { "*" } else { " " },
+                provider.kind()
+            );
         }
         return Ok(());
     }

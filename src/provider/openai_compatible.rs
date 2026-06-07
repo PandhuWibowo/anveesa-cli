@@ -194,9 +194,7 @@ pub async fn ask(
 
         let all_readonly = state.tool_calls.len() > 1
             && state.tool_calls.iter().all(|c| {
-                !tools::is_write_tool(&c.name)
-                    && c.name != "set_plan"
-                    && c.name != "complete_task"
+                !tools::is_write_tool(&c.name) && c.name != "set_plan" && c.name != "complete_task"
             });
 
         if all_readonly {
@@ -209,7 +207,11 @@ pub async fn ask(
             for (i, handle) in handles.into_iter().enumerate() {
                 let (id, name, content) = handle.await.unwrap_or_else(|_| {
                     let c = &state.tool_calls[i];
-                    (c.id.clone(), c.name.clone(), json!({"ok":false,"error":"task panicked"}).to_string())
+                    (
+                        c.id.clone(),
+                        c.name.clone(),
+                        json!({"ok":false,"error":"task panicked"}).to_string(),
+                    )
                 });
                 messages.push(json!({
                     "role": "tool",
@@ -223,7 +225,14 @@ pub async fn ask(
                 if tools::is_write_tool(&call.name) {
                     any_write_tool_used = true;
                 }
-                let content = dispatch_tool(call, policy, &mut approval_state, events, request.mcp.as_deref()).await;
+                let content = dispatch_tool(
+                    call,
+                    policy,
+                    &mut approval_state,
+                    events,
+                    request.mcp.as_deref(),
+                )
+                .await;
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call.id,
@@ -280,7 +289,9 @@ fn normalize_path(p: &std::path::Path) -> std::path::PathBuf {
     let mut out = std::path::PathBuf::new();
     for comp in p.components() {
         match comp {
-            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
             std::path::Component::CurDir => {}
             _ => out.push(comp),
         }
@@ -291,11 +302,17 @@ fn normalize_path(p: &std::path::Path) -> std::path::PathBuf {
 /// Returns Some(error) if `path_str` resolves to a location outside the sandbox root.
 fn sandbox_check(tool_name: &str, arguments: &str) -> Option<String> {
     // Tools that don't take a filesystem path — always allowed
-    if matches!(tool_name, "git_commit" | "git_stash" | "git_branch" | "save_note" | "delete_note" | "run_command") {
+    if matches!(
+        tool_name,
+        "git_commit" | "git_stash" | "git_branch" | "save_note" | "delete_note" | "run_command"
+    ) {
         return None;
     }
-    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else { return None };
-    let path_str = args.get("path")
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return None;
+    };
+    let path_str = args
+        .get("path")
         .or_else(|| args.get("destination"))
         .or_else(|| args.get("dest"))
         .and_then(|v| v.as_str())?;
@@ -338,11 +355,15 @@ const DANGEROUS_PATTERNS: &[&str] = &[
 ];
 
 fn dangerous_command_check(arguments: &str) -> Option<String> {
-    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else { return None };
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return None;
+    };
     let cmd = args["command"].as_str()?;
     for pat in DANGEROUS_PATTERNS {
         if cmd.contains(pat) {
-            return Some(format!("blocked: command matches dangerous pattern '{pat}'"));
+            return Some(format!(
+                "blocked: command matches dangerous pattern '{pat}'"
+            ));
         }
     }
     None
@@ -355,25 +376,40 @@ async fn dispatch_read_only_tool(
 ) -> (String, String, String) {
     if tools::is_mcp_tool(&call.name) {
         let summary = format!("mcp {}", &call.name[5..]);
-        let _ = events.send(StreamEvent::ToolCall { summary: summary.clone() });
+        let _ = events.send(StreamEvent::ToolCall {
+            summary: summary.clone(),
+        });
         let started = Instant::now();
         let result = if let Some(m) = mcp.as_deref() {
-            m.call(&call.name, &call.arguments).await
+            m.call(&call.name, &call.arguments)
+                .await
                 .unwrap_or_else(|| json!({ "ok": false, "error": "server not found" }).to_string())
         } else {
             json!({ "ok": false, "error": "MCP not configured" }).to_string()
         };
         let (ok, err) = parse_tool_result_status(&result);
-        let _ = events.send(StreamEvent::ToolResult { summary, ok, elapsed_ms: started.elapsed().as_millis(), error: err });
+        let _ = events.send(StreamEvent::ToolResult {
+            summary,
+            ok,
+            elapsed_ms: started.elapsed().as_millis(),
+            error: err,
+        });
         return (call.id, call.name, result);
     }
 
     let summary = tools::describe_call(&call.name, &call.arguments);
-    let _ = events.send(StreamEvent::ToolCall { summary: summary.clone() });
+    let _ = events.send(StreamEvent::ToolCall {
+        summary: summary.clone(),
+    });
     let started = Instant::now();
     let result = tools::run(&call.name, &call.arguments).await;
     let (ok, err) = parse_tool_result_status(&result);
-    let _ = events.send(StreamEvent::ToolResult { summary, ok, elapsed_ms: started.elapsed().as_millis(), error: err });
+    let _ = events.send(StreamEvent::ToolResult {
+        summary,
+        ok,
+        elapsed_ms: started.elapsed().as_millis(),
+        error: err,
+    });
     (call.id, call.name, result)
 }
 
@@ -387,10 +423,15 @@ async fn dispatch_tool(
     // Route MCP tools directly — no approval policy, no filesystem restrictions.
     if tools::is_mcp_tool(&call.name) {
         let summary = format!("mcp {}", &call.name[5..]); // strip "mcp__"
-        let _ = events.send(StreamEvent::ToolCall { summary: summary.clone() });
+        let _ = events.send(StreamEvent::ToolCall {
+            summary: summary.clone(),
+        });
         let result = if let Some(m) = mcp {
-            m.call(&call.name, &call.arguments).await
-                .unwrap_or_else(|| serde_json::json!({ "ok": false, "error": "server not found" }).to_string())
+            m.call(&call.name, &call.arguments)
+                .await
+                .unwrap_or_else(|| {
+                    serde_json::json!({ "ok": false, "error": "server not found" }).to_string()
+                })
         } else {
             serde_json::json!({ "ok": false, "error": "MCP not configured" }).to_string()
         };
@@ -503,8 +544,11 @@ async fn dispatch_tool(
         tools::run_command_with_progress(&call.arguments, |line| {
             last_line = line.clone();
             let display: String = line.chars().take(72).collect();
-            let _ = ev.send(StreamEvent::Status { message: format!("Running: {display}") });
-        }).await
+            let _ = ev.send(StreamEvent::Status {
+                message: format!("Running: {display}"),
+            });
+        })
+        .await
     } else {
         tools::run(&call.name, &call.arguments).await
     };
@@ -1021,8 +1065,11 @@ async fn send_with_retry(
                     backoff(attempt).await;
                     continue;
                 }
-                if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
-                    let wait = response.headers()
+                if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    && attempt < MAX_RETRIES
+                {
+                    let wait = response
+                        .headers()
                         .get("retry-after")
                         .and_then(|v| v.to_str().ok())
                         .and_then(|s| s.parse::<u64>().ok())
@@ -1072,8 +1119,12 @@ async fn stream_response(
                 while let Some(newline) = buffer.find('\n') {
                     let line: String = buffer.drain(..=newline).collect();
                     match state.ingest_line(line.trim_end_matches(['\r', '\n'])) {
-                        Some(LineToken::Text(t)) => { let _ = events.send(StreamEvent::Token(t)); }
-                        Some(LineToken::Thinking(t)) => { let _ = events.send(StreamEvent::Thinking(t)); }
+                        Some(LineToken::Text(t)) => {
+                            let _ = events.send(StreamEvent::Token(t));
+                        }
+                        Some(LineToken::Thinking(t)) => {
+                            let _ = events.send(StreamEvent::Thinking(t));
+                        }
                         None => {}
                     }
                 }
@@ -1100,8 +1151,12 @@ async fn stream_response(
     // Process any remaining data in the buffer
     if !buffer.is_empty() {
         match state.ingest_line(buffer.trim()) {
-            Some(LineToken::Text(t)) => { let _ = events.send(StreamEvent::Token(t)); }
-            Some(LineToken::Thinking(t)) => { let _ = events.send(StreamEvent::Thinking(t)); }
+            Some(LineToken::Text(t)) => {
+                let _ = events.send(StreamEvent::Token(t));
+            }
+            Some(LineToken::Thinking(t)) => {
+                let _ = events.send(StreamEvent::Thinking(t));
+            }
             None => {}
         }
     }
@@ -1134,10 +1189,17 @@ struct PartialToolCall {
 impl StreamState {
     /// Process a single SSE line, returning any new token to display.
     fn ingest_line(&mut self, line: &str) -> Option<LineToken> {
-        if self.done { return None; }
+        if self.done {
+            return None;
+        }
         let data = line.strip_prefix("data:")?.trim();
-        if data.is_empty() { return None; }
-        if data == "[DONE]" { self.done = true; return None; }
+        if data.is_empty() {
+            return None;
+        }
+        if data == "[DONE]" {
+            self.done = true;
+            return None;
+        }
         let chunk: Value = serde_json::from_str(data).ok()?;
 
         // Anthropic native streaming: content_block_delta with thinking_delta / text_delta
@@ -1166,13 +1228,18 @@ impl StreamState {
                     }
                 }
                 "message_delta" => {
-                    if let Some(usage) = chunk.get("usage") { self.usage = parse_usage(usage); }
+                    if let Some(usage) = chunk.get("usage") {
+                        self.usage = parse_usage(usage);
+                    }
                     if let Some(r) = chunk.pointer("/delta/stop_reason").and_then(Value::as_str) {
                         self.finish_reason = Some(r.to_string());
                     }
                     return None;
                 }
-                "message_stop" => { self.done = true; return None; }
+                "message_stop" => {
+                    self.done = true;
+                    return None;
+                }
                 _ => {}
             }
         }
@@ -1312,14 +1379,12 @@ fn is_stream_options_error(body: &str) -> bool {
 /// takes only the first line, and truncates to 120 chars.
 fn extract_api_error(body: &str) -> String {
     // Try to pull error.message out of the JSON
-    let extracted = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|v| {
-            v.pointer("/error/message")
-                .or_else(|| v.get("message"))
-                .and_then(|m| m.as_str())
-                .map(str::to_string)
-        });
+    let extracted = serde_json::from_str::<Value>(body).ok().and_then(|v| {
+        v.pointer("/error/message")
+            .or_else(|| v.get("message"))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+    });
 
     let raw = extracted.as_deref().unwrap_or(body);
 
@@ -1351,23 +1416,40 @@ fn extract_api_error(body: &str) -> String {
 
     // Append an actionable hint for common errors
     let e = msg.to_lowercase();
-    let hint = if e.contains("api key") || e.contains("invalid x-api-key") || e.contains("unauthenticated") || e.contains("unauthorized") {
+    let hint = if e.contains("api key")
+        || e.contains("invalid x-api-key")
+        || e.contains("unauthenticated")
+        || e.contains("unauthorized")
+    {
         Some("→ check API key in config (anveesa config init)")
-    } else if e.contains("rate limit") || e.contains("too many requests") || e.contains("quota exceeded") {
+    } else if e.contains("rate limit")
+        || e.contains("too many requests")
+        || e.contains("quota exceeded")
+    {
         Some("→ rate limited; wait a moment or switch provider (/provider)")
     } else if e.contains("insufficient credits") || e.contains("billing") {
         Some("→ check account credits/billing at your provider")
-    } else if e.contains("context length") || e.contains("maximum context") || e.contains("too long") || e.contains("tokens") && e.contains("exceed") {
+    } else if e.contains("context length")
+        || e.contains("maximum context")
+        || e.contains("too long")
+        || e.contains("tokens") && e.contains("exceed")
+    {
         Some("→ context too long; try /compact to free space")
     } else if e.contains("model") && (e.contains("not found") || e.contains("does not exist")) {
         Some("→ unknown model; check /model name or run anveesa config init")
-    } else if e.contains("cannot enable streaming") || e.contains("stream") && e.contains("not support") {
+    } else if e.contains("cannot enable streaming")
+        || e.contains("stream") && e.contains("not support")
+    {
         Some("→ streaming not supported; remove stream_options from config")
     } else {
         None
     };
 
-    if let Some(h) = hint { format!("{msg}  {h}") } else { msg }
+    if let Some(h) = hint {
+        format!("{msg}  {h}")
+    } else {
+        msg
+    }
 }
 
 #[cfg(test)]
@@ -1464,7 +1546,11 @@ mod tests {
         assert!(state.ingest_line("").is_none());
         assert!(state.ingest_line("data: [DONE]").is_none());
         assert!(state.done);
-        assert!(state.ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}").is_none());
+        assert!(
+            state
+                .ingest_line("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}")
+                .is_none()
+        );
     }
 
     #[test]

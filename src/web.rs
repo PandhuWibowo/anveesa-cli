@@ -4,13 +4,13 @@ use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::State,
-    response::{Html, IntoResponse},
     response::sse::{Event, KeepAlive, Sse},
+    response::{Html, IntoResponse},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::{
     cli::AskOptions,
@@ -58,7 +58,9 @@ struct InfoResponse<'a> {
 
 pub async fn run_web(options: AskOptions, port: u16) -> Result<()> {
     let config = Arc::new(AppConfig::load()?);
-    let provider_name = config.provider_name(options.provider.as_deref())?.to_string();
+    let provider_name = config
+        .provider_name(options.provider.as_deref())?
+        .to_string();
     let model = options
         .model
         .clone()
@@ -70,7 +72,12 @@ pub async fn run_web(options: AskOptions, port: u16) -> Result<()> {
         })
         .unwrap_or_else(|| "default".to_string());
 
-    let state = WebState { config, provider_name, model, options };
+    let state = WebState {
+        config,
+        provider_name,
+        model,
+        options,
+    };
 
     let app = Router::new()
         .route("/", get(serve_ui))
@@ -108,10 +115,7 @@ async fn handle_info(State(state): State<WebState>) -> Json<InfoResponse<'static
     Json(InfoResponse { provider, model })
 }
 
-async fn handle_ask(
-    State(state): State<WebState>,
-    Json(body): Json<AskBody>,
-) -> impl IntoResponse {
+async fn handle_ask(State(state): State<WebState>, Json(body): Json<AskBody>) -> impl IntoResponse {
     let history: Vec<ChatMessage> = body
         .history
         .into_iter()
@@ -170,7 +174,9 @@ fn open_browser(url: &str) {
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd").args(["/c", "start", url]).spawn();
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", url])
+        .spawn();
 }
 
 async fn shutdown_signal() {

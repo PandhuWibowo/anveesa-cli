@@ -2,7 +2,9 @@ use super::{App, Msg};
 
 pub(super) fn msg_text(msg: &Msg) -> Option<&str> {
     match msg {
-        Msg::User { text } | Msg::Assistant { text } | Msg::Error(text) | Msg::System(text) => Some(text),
+        Msg::User { text } | Msg::Assistant { text } | Msg::Error(text) | Msg::System(text) => {
+            Some(text)
+        }
         Msg::Tool { text, .. } => Some(text),
         Msg::FileOp { path, .. } => Some(path),
         Msg::Thinking { text, .. } => Some(text),
@@ -15,8 +17,15 @@ pub(super) fn update_search(app: &mut App) {
     app.view.search_results = if q.is_empty() {
         vec![]
     } else {
-        app.view.messages.iter().enumerate()
-            .filter(|(_, m)| msg_text(m).map(|t| t.to_lowercase().contains(&q)).unwrap_or(false))
+        app.view
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                msg_text(m)
+                    .map(|t| t.to_lowercase().contains(&q))
+                    .unwrap_or(false)
+            })
             .map(|(i, _)| i)
             .collect()
     };
@@ -30,17 +39,33 @@ pub(super) fn update_search(app: &mut App) {
 }
 
 const SLASH_COMMANDS: &[&str] = &[
-    "/add", "/clear", "/commit", "/compact", "/copy",
-    "/diff", "/exit", "/export", "/help", "/memory",
-    "/model", "/provider", "/quit", "/search", "/status", "/undo",
+    "/add",
+    "/clear",
+    "/commit",
+    "/compact",
+    "/copy",
+    "/diff",
+    "/exit",
+    "/export",
+    "/help",
+    "/memory",
+    "/model",
+    "/provider",
+    "/quit",
+    "/search",
+    "/status",
+    "/undo",
 ];
 
 pub(super) fn tab_complete(app: &mut App) {
     let input = app.kbd.input.clone();
 
-    let continuing = app.kbd.tab_state.as_ref().map(|(_, cands, idx)| {
-        cands.get(*idx).map(|s| s == &input).unwrap_or(false)
-    }).unwrap_or(false);
+    let continuing = app
+        .kbd
+        .tab_state
+        .as_ref()
+        .map(|(_, cands, idx)| cands.get(*idx).map(|s| s == &input).unwrap_or(false))
+        .unwrap_or(false);
 
     if continuing {
         if let Some((_, cands, idx)) = &mut app.kbd.tab_state {
@@ -54,7 +79,9 @@ pub(super) fn tab_complete(app: &mut App) {
 
     let providers: Vec<String> = app.config.providers.keys().cloned().collect();
     let cands = compute_tab_completions(&input, &app.cwd, &providers);
-    if cands.is_empty() { return; }
+    if cands.is_empty() {
+        return;
+    }
 
     app.kbd.input = cands[0].clone();
     app.kbd.input_cursor = app.kbd.input.len();
@@ -63,20 +90,26 @@ pub(super) fn tab_complete(app: &mut App) {
 
 fn compute_tab_completions(input: &str, cwd: &str, providers: &[String]) -> Vec<String> {
     if input.starts_with('/') && !input.contains(' ') {
-        let matches: Vec<String> = SLASH_COMMANDS.iter()
+        let matches: Vec<String> = SLASH_COMMANDS
+            .iter()
             .filter(|c| c.starts_with(input))
             .map(|s| s.to_string())
             .collect();
-        if !matches.is_empty() { return matches; }
+        if !matches.is_empty() {
+            return matches;
+        }
     }
 
     if let Some(partial) = input.strip_prefix("/provider ") {
-        let mut matches: Vec<String> = providers.iter()
+        let mut matches: Vec<String> = providers
+            .iter()
             .filter(|p| p.starts_with(partial))
             .map(|p| format!("/provider {p}"))
             .collect();
         matches.sort();
-        if !matches.is_empty() { return matches; }
+        if !matches.is_empty() {
+            return matches;
+        }
     }
 
     if let Some(partial) = input.strip_prefix("/add ") {
@@ -107,13 +140,21 @@ fn tab_complete_path(partial: &str, cwd: &str) -> Vec<String> {
         std::path::Path::new(cwd).join(dir_part)
     };
 
-    let Ok(entries) = std::fs::read_dir(&search_dir) else { return vec![]; };
+    let Ok(entries) = std::fs::read_dir(&search_dir) else {
+        return vec![];
+    };
     let mut out: Vec<String> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            if !name.starts_with(file_part) { return None; }
-            let trail = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) { "/" } else { "" };
+            if !name.starts_with(file_part) {
+                return None;
+            }
+            let trail = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                "/"
+            } else {
+                ""
+            };
             Some(format!("{dir_part}{name}{trail}"))
         })
         .collect();
@@ -133,7 +174,11 @@ mod tests {
 
     #[test]
     fn provider_completion() {
-        let providers = vec!["openai".to_string(), "anthropic".to_string(), "openrouter".to_string()];
+        let providers = vec![
+            "openai".to_string(),
+            "anthropic".to_string(),
+            "openrouter".to_string(),
+        ];
         let result = compute_tab_completions("/provider op", ".", &providers);
         assert_eq!(result, vec!["/provider openai", "/provider openrouter"]);
     }

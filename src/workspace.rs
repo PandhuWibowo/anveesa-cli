@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    path::Path,
-    process::Command as ProcessCommand,
-};
+use std::{fs, path::Path, process::Command as ProcessCommand};
 
 use anyhow::{Context, Result};
 
@@ -58,7 +54,10 @@ pub fn workspace_context_for(cwd: &Path) -> Result<String> {
         // Also check git root for .anveesa.md if different from cwd
         let git_root_path = std::path::Path::new(&git_root);
         if git_root_path != cwd {
-            for md_path in &[git_root_path.join(".anveesa.md"), git_root_path.join("ANVEESA.md")] {
+            for md_path in &[
+                git_root_path.join(".anveesa.md"),
+                git_root_path.join("ANVEESA.md"),
+            ] {
                 if let Ok(content) = fs::read_to_string(md_path) {
                     if !content.trim().is_empty() {
                         context.push_str("\nProject instructions (from git root):\n");
@@ -98,11 +97,12 @@ pub fn workspace_context_for(cwd: &Path) -> Result<String> {
         // Repo map — all tracked source files grouped by directory
         if let Some(files) = git_output(&cwd, ["ls-files", "--cached"]) {
             const SOURCE_EXTS: &[&str] = &[
-                ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java",
-                ".kt", ".swift", ".c", ".cpp", ".h", ".hpp", ".cs", ".rb",
-                ".php", ".vue", ".svelte", ".toml", ".yaml", ".yml", ".json",
+                ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".kt", ".swift", ".c",
+                ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".vue", ".svelte", ".toml", ".yaml",
+                ".yml", ".json",
             ];
-            let tracked: Vec<&str> = files.lines()
+            let tracked: Vec<&str> = files
+                .lines()
                 .filter(|f| SOURCE_EXTS.iter().any(|ext| f.ends_with(ext)))
                 .take(250)
                 .collect();
@@ -118,7 +118,8 @@ pub fn workspace_context_for(cwd: &Path) -> Result<String> {
     }
 
     // Available notes
-    let notes_dir = config_path().ok()
+    let notes_dir = config_path()
+        .ok()
         .and_then(|p| p.parent().map(|d| d.join("notes")));
     if let Some(dir) = notes_dir.filter(|d| d.exists()) {
         let note_keys: Vec<String> = fs::read_dir(&dir)
@@ -129,7 +130,9 @@ pub fn workspace_context_for(cwd: &Path) -> Result<String> {
                 let path = e.path();
                 if path.extension()?.to_str()? == "md" {
                     path.file_stem()?.to_str().map(str::to_string)
-                } else { None }
+                } else {
+                    None
+                }
             })
             .collect();
         if !note_keys.is_empty() {
@@ -152,7 +155,10 @@ pub fn workspace_context_for(cwd: &Path) -> Result<String> {
         }
     } else if let Ok(raw) = fs::read_to_string(cwd.join("Cargo.toml")) {
         for line in raw.lines().take(15) {
-            if line.starts_with("name") || line.starts_with("version") || line.starts_with("description") {
+            if line.starts_with("name")
+                || line.starts_with("version")
+                || line.starts_with("description")
+            {
                 context.push_str(&format!("- cargo_{}\n", line.trim()));
             }
         }

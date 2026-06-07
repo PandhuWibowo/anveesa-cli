@@ -70,7 +70,11 @@ pub fn list_sessions() -> Result<()> {
     println!("\x1b[90m  ──────────────────────────────────────────────────────\x1b[0m");
     for (cwd, turns, saved_at) in &sessions {
         let age = format_session_age(Some(*saved_at));
-        let turn_str = if *turns == 1 { "1 turn ".to_string() } else { format!("{turns} turns") };
+        let turn_str = if *turns == 1 {
+            "1 turn ".to_string()
+        } else {
+            format!("{turns} turns")
+        };
         let short_cwd = std::env::var("HOME")
             .map(|h| cwd.replacen(&h, "~", 1))
             .unwrap_or_else(|_| cwd.clone());
@@ -167,7 +171,9 @@ pub fn append_repl_history(path: &Path, prompt: &str) -> io::Result<()> {
 /// startup so orphaned sessions (from deleted/moved projects) eventually disappear.
 pub fn purge_stale_sessions() {
     let Some(dir) = sessions_dir() else { return };
-    let Ok(entries) = fs::read_dir(&dir) else { return };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
     let cutoff = unix_now().saturating_sub(30 * 24 * 3600);
     for entry in entries.flatten() {
         let path = entry.path();
@@ -363,7 +369,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old_session.json");
-        let options = AskOptions { provider: Some("p".into()), model: None, system: None, stdin: false, yes: false };
+        let options = AskOptions {
+            provider: Some("p".into()),
+            model: None,
+            system: None,
+            stdin: false,
+            yes: false,
+        };
         save_interactive_session(&path, &dir, "p", &options, &[]).unwrap();
 
         // Backdate saved_at by 31 days.
@@ -385,8 +397,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
-        let options = AskOptions { provider: Some("p".into()), model: None, system: None, stdin: false, yes: false };
-        let history = vec![ChatMessage::user("hi".into()), ChatMessage::assistant("hello".into())];
+        let options = AskOptions {
+            provider: Some("p".into()),
+            model: None,
+            system: None,
+            stdin: false,
+            yes: false,
+        };
+        let history = vec![
+            ChatMessage::user("hi".into()),
+            ChatMessage::assistant("hello".into()),
+        ];
         save_interactive_session(&path, &dir, "p", &options, &history).unwrap();
 
         let loaded = load_interactive_session(&path, &dir).unwrap();
@@ -406,7 +427,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir_b);
         fs::create_dir_all(&dir_a).unwrap();
         let path = dir_a.join("session.json");
-        let options = AskOptions { provider: None, model: None, system: None, stdin: false, yes: false };
+        let options = AskOptions {
+            provider: None,
+            model: None,
+            system: None,
+            stdin: false,
+            yes: false,
+        };
         save_interactive_session(&path, &dir_a, "p", &options, &[]).unwrap();
 
         // Loading with a different cwd must return None.
@@ -421,12 +448,18 @@ mod tests {
 
     #[test]
     fn purge_removes_old_files_but_keeps_recent_ones() {
-        let sessions_base = std::env::temp_dir()
-            .join(format!("anveesa_purge_{}", std::process::id()));
+        let sessions_base =
+            std::env::temp_dir().join(format!("anveesa_purge_{}", std::process::id()));
         let _ = fs::remove_dir_all(&sessions_base);
         fs::create_dir_all(&sessions_base).unwrap();
 
-        let options = AskOptions { provider: None, model: None, system: None, stdin: false, yes: false };
+        let options = AskOptions {
+            provider: None,
+            model: None,
+            system: None,
+            stdin: false,
+            yes: false,
+        };
 
         // Create two fresh sessions and one stale session.
         let fresh_dir_1 = sessions_base.join("project1");
@@ -455,13 +488,17 @@ mod tests {
         let cutoff = unix_now().saturating_sub(30 * 24 * 3600);
         for entry in fs::read_dir(&sessions_base).unwrap().flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
             let stale = fs::read_to_string(&path)
                 .ok()
                 .and_then(|c| serde_json::from_str::<InteractiveSession>(&c).ok())
                 .map(|s| s.saved_at > 0 && s.saved_at < cutoff)
                 .unwrap_or(true);
-            if stale { let _ = fs::remove_file(&path); }
+            if stale {
+                let _ = fs::remove_file(&path);
+            }
         }
 
         assert!(fresh1_path.exists(), "fresh session 1 must not be purged");
@@ -473,8 +510,8 @@ mod tests {
 
     #[test]
     fn purge_removes_unparseable_json_files() {
-        let sessions_base = std::env::temp_dir()
-            .join(format!("anveesa_purge_bad_{}", std::process::id()));
+        let sessions_base =
+            std::env::temp_dir().join(format!("anveesa_purge_bad_{}", std::process::id()));
         let _ = fs::remove_dir_all(&sessions_base);
         fs::create_dir_all(&sessions_base).unwrap();
 
@@ -485,13 +522,17 @@ mod tests {
         let cutoff = unix_now().saturating_sub(30 * 24 * 3600);
         for entry in fs::read_dir(&sessions_base).unwrap().flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
             let stale = fs::read_to_string(&path)
                 .ok()
                 .and_then(|c| serde_json::from_str::<InteractiveSession>(&c).ok())
                 .map(|s| s.saved_at > 0 && s.saved_at < cutoff)
                 .unwrap_or(true);
-            if stale { let _ = fs::remove_file(&path); }
+            if stale {
+                let _ = fs::remove_file(&path);
+            }
         }
 
         assert!(!bad_path.exists(), "corrupt session file must be purged");

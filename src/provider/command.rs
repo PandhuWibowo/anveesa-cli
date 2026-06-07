@@ -75,7 +75,11 @@ pub async fn ask(
 
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let _ = events.send(StreamEvent::Token(text.clone()));
-    Ok(TurnResult { text, usage: None, model_used: None })
+    Ok(TurnResult {
+        text,
+        usage: None,
+        model_used: None,
+    })
 }
 
 fn command_prompt(config: &CommandProviderConfig, request: &PromptRequest) -> String {

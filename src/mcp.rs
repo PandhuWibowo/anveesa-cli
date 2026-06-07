@@ -88,8 +88,13 @@ impl McpServer {
     async fn recv_msg(&self) -> Result<Value> {
         let mut stdout = self.stdout.lock().await;
         let mut line = String::new();
-        stdout.read_line(&mut line).await.context("MCP server closed")?;
-        if line.is_empty() { bail!("MCP server closed connection"); }
+        stdout
+            .read_line(&mut line)
+            .await
+            .context("MCP server closed")?;
+        if line.is_empty() {
+            bail!("MCP server closed connection");
+        }
         Ok(serde_json::from_str(line.trim())?)
     }
 
@@ -100,7 +105,8 @@ impl McpServer {
             *n += 1;
             v
         };
-        self.send_msg(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await?;
+        self.send_msg(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+            .await?;
 
         // Wait for our response with a timeout
         let timeout = tokio::time::Duration::from_secs(30);
@@ -117,20 +123,28 @@ impl McpServer {
             }
         })
         .await
-        .context(format!("MCP request to '{}' timed out after 30s", self.name))??;
+        .context(format!(
+            "MCP request to '{}' timed out after 30s",
+            self.name
+        ))??;
         Ok(result)
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
-        self.send_msg(json!({ "jsonrpc": "2.0", "method": method, "params": params })).await
+        self.send_msg(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+            .await
     }
 
     async fn initialize(&self) -> Result<()> {
-        self.request("initialize", json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "anveesa", "version": env!("CARGO_PKG_VERSION") }
-        })).await?;
+        self.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "anveesa", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        )
+        .await?;
         self.notify("notifications/initialized", json!({})).await?;
         Ok(())
     }
@@ -138,35 +152,45 @@ impl McpServer {
     async fn list_tools(&self) -> Result<Vec<McpTool>> {
         let result = self.request("tools/list", json!({})).await?;
         let raw = result["tools"].as_array().cloned().unwrap_or_default();
-        Ok(raw.into_iter().filter_map(|t| {
-            let original_name = t["name"].as_str()?.to_string();
-            let description = t["description"].as_str().unwrap_or("").to_string();
-            let input_schema = t.get("inputSchema").cloned().unwrap_or(json!({"type":"object","properties":{}}));
-            let safe_server = self.name.replace('-', "_").replace('.', "_");
-            Some(McpTool {
-                name: format!("mcp__{safe_server}__{original_name}"),
-                description,
-                input_schema,
-                server: self.name.clone(),
-                original_name,
+        Ok(raw
+            .into_iter()
+            .filter_map(|t| {
+                let original_name = t["name"].as_str()?.to_string();
+                let description = t["description"].as_str().unwrap_or("").to_string();
+                let input_schema = t
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or(json!({"type":"object","properties":{}}));
+                let safe_server = self.name.replace('-', "_").replace('.', "_");
+                Some(McpTool {
+                    name: format!("mcp__{safe_server}__{original_name}"),
+                    description,
+                    input_schema,
+                    server: self.name.clone(),
+                    original_name,
+                })
             })
-        }).collect())
+            .collect())
     }
 
     async fn call_tool(&self, original_name: &str, arguments: Value) -> Result<String> {
-        let result = self.request("tools/call", json!({
-            "name": original_name,
-            "arguments": arguments,
-        })).await?;
+        let result = self
+            .request(
+                "tools/call",
+                json!({
+                    "name": original_name,
+                    "arguments": arguments,
+                }),
+            )
+            .await?;
 
         // MCP returns content as an array of typed blocks
         let content = result["content"].as_array().cloned().unwrap_or_default();
-        let text = content.iter()
-            .filter_map(|c| {
-                match c["type"].as_str() {
-                    Some("text") => c["text"].as_str().map(str::to_string),
-                    _ => None,
-                }
+        let text = content
+            .iter()
+            .filter_map(|c| match c["type"].as_str() {
+                Some("text") => c["text"].as_str().map(str::to_string),
+                _ => None,
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -197,8 +221,10 @@ impl McpManager {
         for (name, cfg) in configs {
             match McpServer::connect(name, cfg).await {
                 Ok(pair) => {
-                    eprintln!("\x1b[2m  MCP: connected to '{name}' ({} tools)\x1b[0m",
-                        pair.1.len());
+                    eprintln!(
+                        "\x1b[2m  MCP: connected to '{name}' ({} tools)\x1b[0m",
+                        pair.1.len()
+                    );
                     servers.push(pair);
                 }
                 Err(e) => {
@@ -211,14 +237,16 @@ impl McpManager {
 
     /// All tool definitions from all connected servers.
     pub fn tool_definitions(&self) -> Vec<Value> {
-        self.servers.iter()
+        self.servers
+            .iter()
             .flat_map(|(_, tools)| tools.iter().map(|t| t.to_definition()))
             .collect()
     }
 
     /// All tool names from all connected servers.
     pub fn tool_names(&self) -> Vec<String> {
-        self.servers.iter()
+        self.servers
+            .iter()
             .flat_map(|(_, tools)| tools.iter().map(|t| t.name.clone()))
             .collect()
     }

@@ -71,10 +71,19 @@ beyond this conversation — notes survive across sessions.",
 pub fn is_write_tool(name: &str) -> bool {
     matches!(
         name,
-        "create_dir" | "write_file" | "edit_file" | "run_command"
-        | "delete_file" | "move_file" | "copy_file" | "patch_file"
-        | "git_commit" | "git_stash" | "git_branch"
-        | "save_note" | "delete_note"
+        "create_dir"
+            | "write_file"
+            | "edit_file"
+            | "run_command"
+            | "delete_file"
+            | "move_file"
+            | "copy_file"
+            | "patch_file"
+            | "git_commit"
+            | "git_stash"
+            | "git_branch"
+            | "save_note"
+            | "delete_note"
     )
 }
 
@@ -100,34 +109,50 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
             field("root").if_empty(".")
         ),
         "read_file" => format!("read file {}", field("path")),
-        "web_search"  => format!("web search `{}`", field("query")),
-        "fetch_url"   => format!("fetch {}", field("url")),
+        "web_search" => format!("web search `{}`", field("query")),
+        "fetch_url" => format!("fetch {}", field("url")),
         "screenshot_url" => format!("screenshot {}", field("url")),
-        "git_status"  => "git status".to_string(),
-        "git_diff"    => {
+        "git_status" => "git status".to_string(),
+        "git_diff" => {
             let path = field("path");
-            if path.is_empty() { "git diff".to_string() } else { format!("git diff {path}") }
+            if path.is_empty() {
+                "git diff".to_string()
+            } else {
+                format!("git diff {path}")
+            }
         }
-        "git_log"     => "git log".to_string(),
-        "git_blame"   => format!("git blame {}", field("path")),
-        "git_show"    => format!("git show {}", field("ref").if_empty("HEAD")),
-        "git_stash"   => format!("git stash {}", field("action").if_empty("list")),
-        "git_branch"  => {
-            if !field("create").is_empty() { format!("git branch -b {}", field("create")) }
-            else if !field("checkout").is_empty() { format!("git checkout {}", field("checkout")) }
-            else if !field("delete").is_empty() { format!("git branch -d {}", field("delete")) }
-            else { "git branch".to_string() }
+        "git_log" => "git log".to_string(),
+        "git_blame" => format!("git blame {}", field("path")),
+        "git_show" => format!("git show {}", field("ref").if_empty("HEAD")),
+        "git_stash" => format!("git stash {}", field("action").if_empty("list")),
+        "git_branch" => {
+            if !field("create").is_empty() {
+                format!("git branch -b {}", field("create"))
+            } else if !field("checkout").is_empty() {
+                format!("git checkout {}", field("checkout"))
+            } else if !field("delete").is_empty() {
+                format!("git branch -d {}", field("delete"))
+            } else {
+                "git branch".to_string()
+            }
         }
-        "git_commit"  => format!("git commit {}", field("message")),
-        "patch_file"   => format!("patch file {}", field("path")),
-        "delete_file"  => format!("delete {}", field("path")),
-        "save_note"    => format!("save note `{}`", field("key")),
-        "read_notes"   => format!("read notes{}", if field("key").is_empty() { String::new() } else { format!(" `{}`", field("key")) }),
+        "git_commit" => format!("git commit {}", field("message")),
+        "patch_file" => format!("patch file {}", field("path")),
+        "delete_file" => format!("delete {}", field("path")),
+        "save_note" => format!("save note `{}`", field("key")),
+        "read_notes" => format!(
+            "read notes{}",
+            if field("key").is_empty() {
+                String::new()
+            } else {
+                format!(" `{}`", field("key"))
+            }
+        ),
         "search_notes" => format!("search notes `{}`", field("query")),
-        "delete_note"  => format!("delete note `{}`", field("key")),
-        "move_file"   => format!("move {} → {}", field("from"), field("to")),
-        "copy_file"   => format!("copy {} → {}", field("from"), field("to")),
-        "create_dir"  => format!("create directory {}", field("path")),
+        "delete_note" => format!("delete note `{}`", field("key")),
+        "move_file" => format!("move {} → {}", field("from"), field("to")),
+        "copy_file" => format!("copy {} → {}", field("from"), field("to")),
+        "create_dir" => format!("create directory {}", field("path")),
         "write_file" => format!("write file {}", field("path")),
         "edit_file" => format!("edit file {}", field("path")),
         "run_command" => format!("run command `{}`", field("command")),
@@ -600,31 +625,31 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
 
 pub async fn run(name: &str, arguments: &str) -> String {
     let result = match name {
-        "list_dir"   => list_dir(arguments).await,
+        "list_dir" => list_dir(arguments).await,
         "find_files" => find_files(arguments).await,
         "search_text" => search_text(arguments).await,
-        "read_file"  => read_file(arguments).await,
+        "read_file" => read_file(arguments).await,
         "web_search" => web_search(arguments).await,
-        "fetch_url"  => fetch_url(arguments).await,
-        "git_status"  => git_status(arguments).await,
-        "git_diff"    => git_diff(arguments).await,
-        "git_log"     => git_log(arguments).await,
-        "git_blame"   => git_blame(arguments).await,
-        "git_show"    => git_show(arguments).await,
-        "git_stash"   => git_stash(arguments).await,
-        "git_branch"  => git_branch(arguments).await,
-        "git_commit"  => git_commit(arguments).await,
-        "patch_file"   => patch_file(arguments).await,
-        "delete_file"  => delete_file(arguments).await,
-        "save_note"    => save_note(arguments).await,
-        "read_notes"   => read_notes(arguments).await,
+        "fetch_url" => fetch_url(arguments).await,
+        "git_status" => git_status(arguments).await,
+        "git_diff" => git_diff(arguments).await,
+        "git_log" => git_log(arguments).await,
+        "git_blame" => git_blame(arguments).await,
+        "git_show" => git_show(arguments).await,
+        "git_stash" => git_stash(arguments).await,
+        "git_branch" => git_branch(arguments).await,
+        "git_commit" => git_commit(arguments).await,
+        "patch_file" => patch_file(arguments).await,
+        "delete_file" => delete_file(arguments).await,
+        "save_note" => save_note(arguments).await,
+        "read_notes" => read_notes(arguments).await,
         "search_notes" => search_notes(arguments).await,
-        "delete_note"  => delete_note(arguments).await,
-        "move_file"   => move_file(arguments).await,
-        "copy_file"   => copy_file(arguments).await,
-        "create_dir"  => create_dir(arguments).await,
+        "delete_note" => delete_note(arguments).await,
+        "move_file" => move_file(arguments).await,
+        "copy_file" => copy_file(arguments).await,
+        "create_dir" => create_dir(arguments).await,
         "write_file" => write_file(arguments).await,
-        "edit_file"  => edit_file(arguments).await,
+        "edit_file" => edit_file(arguments).await,
         "run_command" => run_command(arguments).await,
         "screenshot_url" => screenshot_url(arguments).await,
         _ => Err(anyhow!("unknown tool '{name}'")),
@@ -778,7 +803,10 @@ async fn read_file(arguments: &str) -> Result<Value> {
     let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
     let content = if let Some(mtime) = mtime {
         let cache_key = (path.clone(), mtime);
-        let cached = file_cache().lock().ok().and_then(|c| c.get(&cache_key).cloned());
+        let cached = file_cache()
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&cache_key).cloned());
         if let Some(c) = cached {
             c
         } else {
@@ -829,13 +857,17 @@ fn http_client() -> &'static reqwest::Client {
 async fn web_search(arguments: &str) -> Result<Value> {
     let args: WebSearchArgs = parse_args(arguments)?;
     let query = args.query.trim();
-    if query.is_empty() { bail!("query is empty"); }
+    if query.is_empty() {
+        bail!("query is empty");
+    }
 
     // 1. Brave Search API (best quality, free tier available)
     if let Ok(key) = std::env::var("BRAVE_SEARCH_API_KEY") {
         if let Ok(results) = search_brave(query, &key).await {
             if !results.is_empty() {
-                return Ok(json!({ "ok": true, "query": query, "source": "brave", "results": results }));
+                return Ok(
+                    json!({ "ok": true, "query": query, "source": "brave", "results": results }),
+                );
             }
         }
     }
@@ -844,7 +876,9 @@ async fn web_search(arguments: &str) -> Result<Value> {
     if let Ok(key) = std::env::var("SERPER_API_KEY") {
         if let Ok(results) = search_serper(query, &key).await {
             if !results.is_empty() {
-                return Ok(json!({ "ok": true, "query": query, "source": "serper", "results": results }));
+                return Ok(
+                    json!({ "ok": true, "query": query, "source": "serper", "results": results }),
+                );
             }
         }
     }
@@ -872,11 +906,17 @@ async fn web_search(arguments: &str) -> Result<Value> {
 
     // 4. DuckDuckGo lite HTML fallback
     if results.is_empty() {
-        let lite_url = format!("https://lite.duckduckgo.com/lite/?q={}", percent_encode(query));
+        let lite_url = format!(
+            "https://lite.duckduckgo.com/lite/?q={}",
+            percent_encode(query)
+        );
         if let Ok(resp) = http_client()
             .get(&lite_url)
             .header("Accept-Language", "en-US,en;q=0.9")
-            .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            )
             .send()
             .await
         {
@@ -887,7 +927,11 @@ async fn web_search(arguments: &str) -> Result<Value> {
     }
 
     results.truncate(10);
-    let source = if results.is_empty() { "none" } else { "duckduckgo" };
+    let source = if results.is_empty() {
+        "none"
+    } else {
+        "duckduckgo"
+    };
     Ok(json!({ "ok": true, "query": query, "source": source, "results": results }))
 }
 
@@ -908,14 +952,23 @@ async fn search_brave(query: &str, api_key: &str) -> Result<Vec<Value>> {
     if !resp.status().is_success() {
         bail!("Brave Search HTTP {}", resp.status());
     }
-    let body: Value = resp.json().await.context("failed to parse Brave response")?;
-    let results = body["web"]["results"].as_array().cloned().unwrap_or_default();
-    Ok(results.into_iter().filter_map(|r| {
-        let title = r["title"].as_str()?;
-        let url   = r["url"].as_str()?;
-        let snip  = r["description"].as_str().unwrap_or("");
-        Some(json!({ "title": title, "snippet": snip, "url": url }))
-    }).collect())
+    let body: Value = resp
+        .json()
+        .await
+        .context("failed to parse Brave response")?;
+    let results = body["web"]["results"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Ok(results
+        .into_iter()
+        .filter_map(|r| {
+            let title = r["title"].as_str()?;
+            let url = r["url"].as_str()?;
+            let snip = r["description"].as_str().unwrap_or("");
+            Some(json!({ "title": title, "snippet": snip, "url": url }))
+        })
+        .collect())
 }
 
 async fn search_serper(query: &str, api_key: &str) -> Result<Vec<Value>> {
@@ -931,14 +984,20 @@ async fn search_serper(query: &str, api_key: &str) -> Result<Vec<Value>> {
     if !resp.status().is_success() {
         bail!("Serper HTTP {}", resp.status());
     }
-    let body: Value = resp.json().await.context("failed to parse Serper response")?;
+    let body: Value = resp
+        .json()
+        .await
+        .context("failed to parse Serper response")?;
     let results = body["organic"].as_array().cloned().unwrap_or_default();
-    Ok(results.into_iter().filter_map(|r| {
-        let title = r["title"].as_str()?;
-        let url   = r["link"].as_str()?;
-        let snip  = r["snippet"].as_str().unwrap_or("");
-        Some(json!({ "title": title, "snippet": snip, "url": url }))
-    }).collect())
+    Ok(results
+        .into_iter()
+        .filter_map(|r| {
+            let title = r["title"].as_str()?;
+            let url = r["link"].as_str()?;
+            let snip = r["snippet"].as_str().unwrap_or("");
+            Some(json!({ "title": title, "snippet": snip, "url": url }))
+        })
+        .collect())
 }
 
 /// Scrape DuckDuckGo lite (text-only) results page.
@@ -947,7 +1006,9 @@ fn scrape_ddg_lite(html: &str, max: usize) -> Vec<Value> {
     let mut pos = 0;
     while results.len() < max {
         // DDG lite uses <a class="result-link"> for result links
-        let Some(a_pos) = html[pos..].find("class=\"result-link\"") else { break };
+        let Some(a_pos) = html[pos..].find("class=\"result-link\"") else {
+            break;
+        };
         let block = pos + a_pos;
 
         let url = extract_attr(&html[block..block.min(html.len()).min(block + 300)], "href")
@@ -971,45 +1032,75 @@ fn scrape_ddg_lite(html: &str, max: usize) -> Vec<Value> {
     results
 }
 
-
 fn tag_attr(tag: &str, attr: &str) -> Option<String> {
     let dq = format!("{attr}=\"");
     let sq = format!("{attr}='");
     if let Some(s) = tag.find(&dq) {
         let start = s + dq.len();
-        tag[start..].find('"').map(|e| tag[start..start + e].to_string())
+        tag[start..]
+            .find('"')
+            .map(|e| tag[start..start + e].to_string())
     } else if let Some(s) = tag.find(&sq) {
         let start = s + sq.len();
-        tag[start..].find('\'').map(|e| tag[start..start + e].to_string())
+        tag[start..]
+            .find('\'')
+            .map(|e| tag[start..start + e].to_string())
     } else {
         None
     }
 }
 
 fn url_origin(url: &str) -> String {
-    let skip = if url.starts_with("https://") { 8 } else if url.starts_with("http://") { 7 } else { return String::new() };
+    let skip = if url.starts_with("https://") {
+        8
+    } else if url.starts_with("http://") {
+        7
+    } else {
+        return String::new();
+    };
     let scheme = &url[..skip - 3];
     let host = url[skip..].split('/').next().unwrap_or("");
     format!("{scheme}://{host}")
 }
 
 fn url_base_path(url: &str) -> String {
-    let skip = if url.starts_with("https://") { 8 } else if url.starts_with("http://") { 7 } else { return "/".to_string() };
+    let skip = if url.starts_with("https://") {
+        8
+    } else if url.starts_with("http://") {
+        7
+    } else {
+        return "/".to_string();
+    };
     let rest = &url[skip..];
-    let path = rest.split_once('/').map(|(_, p)| format!("/{p}")).unwrap_or_default();
-    path.rfind('/').map(|i| path[..i + 1].to_string()).unwrap_or_else(|| "/".to_string())
+    let path = rest
+        .split_once('/')
+        .map(|(_, p)| format!("/{p}"))
+        .unwrap_or_default();
+    path.rfind('/')
+        .map(|i| path[..i + 1].to_string())
+        .unwrap_or_else(|| "/".to_string())
 }
 
 fn resolve_asset_url(href: &str, origin: &str, base_path: &str) -> Option<String> {
     let h = href.trim();
-    if h.is_empty() { return None; }
+    if h.is_empty() {
+        return None;
+    }
     if h.starts_with("http://") || h.starts_with("https://") {
         Some(h.to_string())
     } else if h.starts_with("//") {
-        let scheme = if origin.starts_with("https") { "https" } else { "http" };
+        let scheme = if origin.starts_with("https") {
+            "https"
+        } else {
+            "http"
+        };
         Some(format!("{scheme}:{h}"))
     } else if h.starts_with('/') {
-        if origin.is_empty() { None } else { Some(format!("{origin}{h}")) }
+        if origin.is_empty() {
+            None
+        } else {
+            Some(format!("{origin}{h}"))
+        }
     } else if !origin.is_empty() {
         Some(format!("{origin}{base_path}{h}"))
     } else {
@@ -1024,9 +1115,13 @@ fn extract_asset_urls(html: &str, base_url: &str, include_js: bool) -> Vec<Strin
     let mut pos = 0;
 
     while pos < html.len() {
-        let Some(lt) = html[pos..].find('<') else { break };
+        let Some(lt) = html[pos..].find('<') else {
+            break;
+        };
         let abs = pos + lt;
-        let Some(gt) = html[abs..].find('>') else { break };
+        let Some(gt) = html[abs..].find('>') else {
+            break;
+        };
         let tag = &html[abs..abs + gt + 1];
         let tag_lo = tag.to_lowercase();
         pos = abs + gt + 1;
@@ -1036,14 +1131,20 @@ fn extract_asset_urls(html: &str, base_url: &str, include_js: bool) -> Vec<Strin
             let as_ = tag_attr(&tag_lo, "as").unwrap_or_default();
             if rel == "stylesheet" || (rel == "preload" && as_ == "style") {
                 tag_attr(tag, "href").or_else(|| tag_attr(&tag_lo, "href"))
-            } else { None }
+            } else {
+                None
+            }
         } else if include_js && tag_lo.starts_with("<script") {
             tag_attr(tag, "src").or_else(|| tag_attr(&tag_lo, "src"))
-        } else { None };
+        } else {
+            None
+        };
 
         if let Some(h) = href {
             if let Some(resolved) = resolve_asset_url(&h, &origin, &base_path) {
-                if !urls.contains(&resolved) { urls.push(resolved); }
+                if !urls.contains(&resolved) {
+                    urls.push(resolved);
+                }
             }
         }
     }
@@ -1065,15 +1166,23 @@ fn extract_tag_text(html: &str, tag: &str) -> Option<String> {
     let end = html[inner_start..].find(&close)? + inner_start;
     let raw = &html[inner_start..end];
     let text = html_to_text(raw);
-    if text.trim().is_empty() { None } else { Some(text.trim().to_string()) }
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text.trim().to_string())
+    }
 }
 
 fn clean_ddg_url(raw: &str) -> String {
     // DDG wraps URLs in redirect: //duckduckgo.com/l/?uddg=https%3A%2F%2F...
     if let Some(i) = raw.find("uddg=") {
         let encoded = &raw[i + 5..];
-        let decoded = encoded.replace("%3A", ":").replace("%2F", "/")
-            .replace("%3F", "?").replace("%3D", "=").replace("%26", "&");
+        let decoded = encoded
+            .replace("%3A", ":")
+            .replace("%2F", "/")
+            .replace("%3F", "?")
+            .replace("%3D", "=")
+            .replace("%26", "&");
         decoded.split('&').next().unwrap_or(&decoded).to_string()
     } else if raw.starts_with("//") {
         format!("https:{raw}")
@@ -1097,7 +1206,9 @@ async fn fetch_url(arguments: &str) -> Result<Value> {
     }
     let args: Args = parse_args(arguments)?;
     let url = args.url.trim().to_string();
-    if url.is_empty() { bail!("url is required"); }
+    if url.is_empty() {
+        bail!("url is required");
+    }
     let mode = args.mode.as_deref().unwrap_or("text").to_string();
 
     let response = http_client()
@@ -1107,7 +1218,9 @@ async fn fetch_url(arguments: &str) -> Result<Value> {
         .with_context(|| format!("failed to fetch {url}"))?;
 
     let status = response.status();
-    if !status.is_success() { bail!("HTTP {status}"); }
+    if !status.is_success() {
+        bail!("HTTP {status}");
+    }
 
     let content_type = response
         .headers()
@@ -1116,7 +1229,10 @@ async fn fetch_url(arguments: &str) -> Result<Value> {
         .unwrap_or("text/plain")
         .to_string();
 
-    let body = response.text().await.context("failed to read response body")?;
+    let body = response
+        .text()
+        .await
+        .context("failed to read response body")?;
 
     match mode.as_str() {
         "raw" => {
@@ -1147,17 +1263,28 @@ async fn fetch_url(arguments: &str) -> Result<Value> {
             let mut handles = Vec::new();
             for asset_url in asset_urls {
                 handles.push(tokio::spawn(async move {
-                    let Ok(resp) = http_client().get(&asset_url).send().await else { return None; };
-                    if !resp.status().is_success() { return None; }
-                    let ct = resp.headers()
+                    let Ok(resp) = http_client().get(&asset_url).send().await else {
+                        return None;
+                    };
+                    if !resp.status().is_success() {
+                        return None;
+                    }
+                    let ct = resp
+                        .headers()
                         .get("content-type")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("")
                         .to_string();
-                    let Ok(content) = resp.text().await else { return None; };
-                    let kind = if ct.contains("css") || asset_url.ends_with(".css") { "css" }
-                        else if ct.contains("javascript") || asset_url.contains(".js") { "js" }
-                        else { "other" };
+                    let Ok(content) = resp.text().await else {
+                        return None;
+                    };
+                    let kind = if ct.contains("css") || asset_url.ends_with(".css") {
+                        "css"
+                    } else if ct.contains("javascript") || asset_url.contains(".js") {
+                        "js"
+                    } else {
+                        "other"
+                    };
                     let char_count = content.chars().count();
                     let truncated = char_count > ASSET_MAX;
                     let trimmed: String = content.chars().take(ASSET_MAX).collect();
@@ -1173,7 +1300,9 @@ async fn fetch_url(arguments: &str) -> Result<Value> {
 
             let mut assets: Vec<Value> = Vec::new();
             for h in handles {
-                if let Ok(Some(a)) = h.await { assets.push(a); }
+                if let Ok(Some(a)) = h.await {
+                    assets.push(a);
+                }
             }
 
             let html_chars = body.chars().count();
@@ -1232,11 +1361,29 @@ fn html_to_text(html: &str) -> String {
         } else if c == '>' {
             in_tag = false;
             let raw = tag_buf.trim().to_lowercase();
-            let name = raw.trim_start_matches('/').split_whitespace().next().unwrap_or("");
+            let name = raw
+                .trim_start_matches('/')
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
             if matches!(name, "script" | "style") && !raw.starts_with('/') {
                 skip_close = Some(name.to_string());
             }
-            if matches!(name, "p"|"div"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6"|"br"|"li"|"tr"|"section"|"article") {
+            if matches!(
+                name,
+                "p" | "div"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "br"
+                    | "li"
+                    | "tr"
+                    | "section"
+                    | "article"
+            ) {
                 out.push('\n');
             }
             tag_buf.clear();
@@ -1248,9 +1395,14 @@ fn html_to_text(html: &str) -> String {
     }
 
     let out = out
-        .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-        .replace("&quot;", "\"").replace("&#39;", "'").replace("&nbsp;", " ")
-        .replace("&#x27;", "'").replace("&#x2F;", "/");
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&#x27;", "'")
+        .replace("&#x2F;", "/");
 
     // Collapse blank lines
     let mut result = String::new();
@@ -1259,7 +1411,9 @@ fn html_to_text(html: &str) -> String {
         let t = line.trim();
         if t.is_empty() {
             blank += 1;
-            if blank <= 1 { result.push('\n'); }
+            if blank <= 1 {
+                result.push('\n');
+            }
         } else {
             blank = 0;
             result.push_str(t);
@@ -1288,16 +1442,25 @@ async fn git_status(_arguments: &str) -> Result<Value> {
 async fn git_diff(arguments: &str) -> Result<Value> {
     #[derive(Deserialize, Default)]
     struct Args {
-        #[serde(default)] staged: bool,
-        #[serde(default)] path: Option<String>,
-        #[serde(rename = "ref", default)] refspec: Option<String>,
+        #[serde(default)]
+        staged: bool,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(rename = "ref", default)]
+        refspec: Option<String>,
     }
     let args: Args = serde_json::from_str(arguments).unwrap_or_default();
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("diff").kill_on_drop(true);
-    if args.staged { cmd.arg("--staged"); }
-    if let Some(r) = &args.refspec { cmd.arg(r); }
-    if let Some(p) = &args.path { cmd.arg("--").arg(p); }
+    if args.staged {
+        cmd.arg("--staged");
+    }
+    if let Some(r) = &args.refspec {
+        cmd.arg(r);
+    }
+    if let Some(p) = &args.path {
+        cmd.arg("--").arg(p);
+    }
     let out = cmd.output().await.context("failed to run git diff")?;
     let diff = String::from_utf8_lossy(&out.stdout).to_string();
     let truncated = diff.len() > 30_000;
@@ -1311,15 +1474,22 @@ async fn git_diff(arguments: &str) -> Result<Value> {
 async fn git_log(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
     struct Args {
-        #[serde(default = "default_n")] n: usize,
-        #[serde(default)] path: Option<String>,
+        #[serde(default = "default_n")]
+        n: usize,
+        #[serde(default)]
+        path: Option<String>,
     }
-    fn default_n() -> usize { 20 }
+    fn default_n() -> usize {
+        20
+    }
     let args: Args = serde_json::from_str(arguments).unwrap_or(Args { n: 20, path: None });
     let n = args.n.clamp(1, 100);
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args(["log", "--oneline", "--decorate", &format!("-{n}")]).kill_on_drop(true);
-    if let Some(p) = &args.path { cmd.arg("--").arg(p); }
+    cmd.args(["log", "--oneline", "--decorate", &format!("-{n}")])
+        .kill_on_drop(true);
+    if let Some(p) = &args.path {
+        cmd.arg("--").arg(p);
+    }
     let out = cmd.output().await.context("failed to run git log")?;
     Ok(json!({
         "ok": out.status.success(),
@@ -1332,8 +1502,10 @@ async fn git_blame(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
     struct Args {
         path: String,
-        #[serde(default)] start_line: Option<usize>,
-        #[serde(default)] end_line: Option<usize>,
+        #[serde(default)]
+        start_line: Option<usize>,
+        #[serde(default)]
+        end_line: Option<usize>,
     }
     let args: Args = parse_args(arguments)?;
     let mut cmd = tokio::process::Command::new("git");
@@ -1358,14 +1530,18 @@ async fn git_blame(arguments: &str) -> Result<Value> {
 async fn git_show(arguments: &str) -> Result<Value> {
     #[derive(Deserialize, Default)]
     struct Args {
-        #[serde(rename = "ref", default)] refspec: Option<String>,
-        #[serde(default)] path: Option<String>,
+        #[serde(rename = "ref", default)]
+        refspec: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
     }
     let args: Args = serde_json::from_str(arguments).unwrap_or_default();
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("show").kill_on_drop(true);
     cmd.arg(args.refspec.as_deref().unwrap_or("HEAD"));
-    if let Some(p) = &args.path { cmd.arg("--").arg(p); }
+    if let Some(p) = &args.path {
+        cmd.arg("--").arg(p);
+    }
     let out = cmd.output().await.context("failed to run git show")?;
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let truncated = text.len() > 20_000;
@@ -1379,8 +1555,10 @@ async fn git_show(arguments: &str) -> Result<Value> {
 async fn git_stash(arguments: &str) -> Result<Value> {
     #[derive(Deserialize, Default)]
     struct Args {
-        #[serde(default)] action: Option<String>,
-        #[serde(default)] message: Option<String>,
+        #[serde(default)]
+        action: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
     }
     let args: Args = serde_json::from_str(arguments).unwrap_or_default();
     let action = args.action.as_deref().unwrap_or("list");
@@ -1389,11 +1567,19 @@ async fn git_stash(arguments: &str) -> Result<Value> {
     match action {
         "push" => {
             cmd.arg("push");
-            if let Some(m) = &args.message { cmd.arg("-m").arg(m); }
+            if let Some(m) = &args.message {
+                cmd.arg("-m").arg(m);
+            }
         }
-        "pop"  => { cmd.arg("pop"); }
-        "drop" => { cmd.arg("drop"); }
-        _      => { cmd.arg("list"); }
+        "pop" => {
+            cmd.arg("pop");
+        }
+        "drop" => {
+            cmd.arg("drop");
+        }
+        _ => {
+            cmd.arg("list");
+        }
     }
     let out = cmd.output().await.context("failed to run git stash")?;
     Ok(json!({
@@ -1406,23 +1592,37 @@ async fn git_stash(arguments: &str) -> Result<Value> {
 async fn git_branch(arguments: &str) -> Result<Value> {
     #[derive(Deserialize, Default)]
     struct Args {
-        #[serde(default)] create:   Option<String>,
-        #[serde(default)] checkout: Option<String>,
-        #[serde(default)] delete:   Option<String>,
+        #[serde(default)]
+        create: Option<String>,
+        #[serde(default)]
+        checkout: Option<String>,
+        #[serde(default)]
+        delete: Option<String>,
     }
     let args: Args = serde_json::from_str(arguments).unwrap_or_default();
-    let (git_args, key, val): (Vec<&str>, &str, &str) =
-        if let Some(name) = &args.create {
-            (vec!["checkout", "-b", name], "created", name)
-        } else if let Some(name) = &args.checkout {
-            (vec!["checkout", name], "checked_out", name)
-        } else if let Some(name) = &args.delete {
-            (vec!["branch", "-d", name], "deleted", name)
-        } else {
-            let out = tokio::process::Command::new("git").args(["branch", "-a"]).kill_on_drop(true).output().await.context("failed to run git branch")?;
-            return Ok(json!({ "ok": out.status.success(), "branches": String::from_utf8_lossy(&out.stdout).trim().to_string() }));
-        };
-    let out = tokio::process::Command::new("git").args(&git_args).kill_on_drop(true).output().await.context("failed to run git branch")?;
+    let (git_args, key, val): (Vec<&str>, &str, &str) = if let Some(name) = &args.create {
+        (vec!["checkout", "-b", name], "created", name)
+    } else if let Some(name) = &args.checkout {
+        (vec!["checkout", name], "checked_out", name)
+    } else if let Some(name) = &args.delete {
+        (vec!["branch", "-d", name], "deleted", name)
+    } else {
+        let out = tokio::process::Command::new("git")
+            .args(["branch", "-a"])
+            .kill_on_drop(true)
+            .output()
+            .await
+            .context("failed to run git branch")?;
+        return Ok(
+            json!({ "ok": out.status.success(), "branches": String::from_utf8_lossy(&out.stdout).trim().to_string() }),
+        );
+    };
+    let out = tokio::process::Command::new("git")
+        .args(&git_args)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to run git branch")?;
     Ok(json!({
         "ok": out.status.success(),
         key: val,
@@ -1434,12 +1634,20 @@ async fn git_commit(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
     struct Args {
         message: String,
-        #[serde(default)] add_all: bool,
+        #[serde(default)]
+        add_all: bool,
     }
     let args: Args = parse_args(arguments)?;
-    if args.message.trim().is_empty() { bail!("commit message is required"); }
+    if args.message.trim().is_empty() {
+        bail!("commit message is required");
+    }
     if args.add_all {
-        tokio::process::Command::new("git").args(["add", "-A"]).kill_on_drop(true).output().await.context("failed to git add")?;
+        tokio::process::Command::new("git")
+            .args(["add", "-A"])
+            .kill_on_drop(true)
+            .output()
+            .await
+            .context("failed to git add")?;
     }
     let out = tokio::process::Command::new("git")
         .args(["commit", "-m", &args.message])
@@ -1467,7 +1675,8 @@ async fn delete_file(arguments: &str) -> Result<Value> {
     }
     let was_dir = path.is_dir();
     if was_dir {
-        fs::remove_dir_all(&path).with_context(|| format!("failed to delete {}", path.display()))?;
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("failed to delete {}", path.display()))?;
     } else {
         fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
     }
@@ -1476,33 +1685,51 @@ async fn delete_file(arguments: &str) -> Result<Value> {
 
 async fn move_file(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
-    struct Args { from: String, to: String }
+    struct Args {
+        from: String,
+        to: String,
+    }
     let args: Args = parse_args(arguments)?;
     let from = resolve_writable_path(&args.from)?;
-    let to   = resolve_writable_path(&args.to)?;
+    let to = resolve_writable_path(&args.to)?;
     if is_sensitive_path(&from) || is_sensitive_path(&to) {
         bail!("refusing to move sensitive path");
     }
-    if !from.exists() { bail!("{} does not exist", from.display()); }
-    if let Some(parent) = to.parent() { fs::create_dir_all(parent)?; }
-    fs::rename(&from, &to).with_context(|| format!("failed to move {} → {}", from.display(), to.display()))?;
+    if !from.exists() {
+        bail!("{} does not exist", from.display());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(&from, &to)
+        .with_context(|| format!("failed to move {} → {}", from.display(), to.display()))?;
     Ok(json!({ "ok": true, "from": from.display().to_string(), "to": to.display().to_string() }))
 }
 
 async fn copy_file(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
-    struct Args { from: String, to: String }
+    struct Args {
+        from: String,
+        to: String,
+    }
     let args: Args = parse_args(arguments)?;
     let from_str = args.from.trim();
     let from = resolve_path(from_str)?;
-    let to   = resolve_writable_path(&args.to)?;
+    let to = resolve_writable_path(&args.to)?;
     if is_sensitive_path(&from) || is_sensitive_path(&to) {
         bail!("refusing to copy sensitive path");
     }
-    if !from.is_file() { bail!("{} is not a file", from.display()); }
-    if let Some(parent) = to.parent() { fs::create_dir_all(parent)?; }
-    let bytes = fs::copy(&from, &to).with_context(|| format!("failed to copy {} → {}", from.display(), to.display()))?;
-    Ok(json!({ "ok": true, "from": from.display().to_string(), "to": to.display().to_string(), "bytes": bytes }))
+    if !from.is_file() {
+        bail!("{} is not a file", from.display());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = fs::copy(&from, &to)
+        .with_context(|| format!("failed to copy {} → {}", from.display(), to.display()))?;
+    Ok(
+        json!({ "ok": true, "from": from.display().to_string(), "to": to.display().to_string(), "bytes": bytes }),
+    )
 }
 
 async fn create_dir(arguments: &str) -> Result<Value> {
@@ -1558,22 +1785,38 @@ async fn write_file(arguments: &str) -> Result<Value> {
 
 async fn patch_file(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
-    struct Hunk { old_string: String, new_string: String }
+    struct Hunk {
+        old_string: String,
+        new_string: String,
+    }
     #[derive(Deserialize)]
-    struct Args { path: String, patches: Vec<Hunk> }
+    struct Args {
+        path: String,
+        patches: Vec<Hunk>,
+    }
 
     let args: Args = parse_args(arguments)?;
     let path = resolve_writable_path(&args.path)?;
-    if !path.is_file() { bail!("{} is not a file", path.display()); }
-    if is_sensitive_path(&path) { bail!("refusing to edit sensitive file"); }
-    if args.patches.is_empty() { bail!("patches array is empty"); }
+    if !path.is_file() {
+        bail!("{} is not a file", path.display());
+    }
+    if is_sensitive_path(&path) {
+        bail!("refusing to edit sensitive file");
+    }
+    if args.patches.is_empty() {
+        bail!("patches array is empty");
+    }
 
-    let mut content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let mut content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
 
     for (i, hunk) in args.patches.iter().enumerate() {
-        if hunk.old_string.is_empty() { bail!("patch[{i}]: old_string must not be empty"); }
-        if hunk.old_string == hunk.new_string { bail!("patch[{i}]: old_string and new_string are identical"); }
+        if hunk.old_string.is_empty() {
+            bail!("patch[{i}]: old_string must not be empty");
+        }
+        if hunk.old_string == hunk.new_string {
+            bail!("patch[{i}]: old_string and new_string are identical");
+        }
         let count = content.matches(&hunk.old_string).count();
         match count {
             0 => bail!("patch[{i}]: old_string not found in {}", path.display()),
@@ -1584,7 +1827,9 @@ async fn patch_file(arguments: &str) -> Result<Value> {
     }
 
     fs::write(&path, &content).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(json!({ "ok": true, "path": path.display().to_string(), "patches_applied": args.patches.len() }))
+    Ok(
+        json!({ "ok": true, "path": path.display().to_string(), "patches_applied": args.patches.len() }),
+    )
 }
 
 async fn edit_file(arguments: &str) -> Result<Value> {
@@ -1641,19 +1886,36 @@ fn notes_dir() -> Result<PathBuf> {
 
 fn sanitize_key(key: &str) -> String {
     key.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .to_lowercase()
 }
 
 async fn save_note(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
-    struct Args { key: String, content: String, #[serde(default)] append: bool }
+    struct Args {
+        key: String,
+        content: String,
+        #[serde(default)]
+        append: bool,
+    }
     let args: Args = parse_args(arguments)?;
-    if args.key.trim().is_empty() { bail!("key is required"); }
+    if args.key.trim().is_empty() {
+        bail!("key is required");
+    }
     let path = notes_dir()?.join(sanitize_key(&args.key) + ".md");
     let content = if args.append && path.exists() {
-        format!("{}\n\n{}", fs::read_to_string(&path).unwrap_or_default().trim_end(), args.content)
+        format!(
+            "{}\n\n{}",
+            fs::read_to_string(&path).unwrap_or_default().trim_end(),
+            args.content
+        )
     } else {
         args.content
     };
@@ -1663,12 +1925,17 @@ async fn save_note(arguments: &str) -> Result<Value> {
 
 async fn read_notes(arguments: &str) -> Result<Value> {
     #[derive(Deserialize, Default)]
-    struct Args { #[serde(default)] key: Option<String> }
+    struct Args {
+        #[serde(default)]
+        key: Option<String>,
+    }
     let args: Args = serde_json::from_str(arguments).unwrap_or_default();
     let dir = notes_dir()?;
     if let Some(key) = &args.key {
         let path = dir.join(sanitize_key(key) + ".md");
-        if !path.exists() { bail!("note '{}' not found", key); }
+        if !path.exists() {
+            bail!("note '{}' not found", key);
+        }
         let content = fs::read_to_string(&path)?;
         return Ok(json!({ "ok": true, "key": key, "content": content }));
     }
@@ -1676,9 +1943,16 @@ async fn read_notes(arguments: &str) -> Result<Value> {
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
-            let key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let preview = fs::read_to_string(&path).ok()
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let key = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let preview = fs::read_to_string(&path)
+                .ok()
                 .and_then(|c| c.lines().next().map(|l| l.trim().to_string()))
                 .unwrap_or_default();
             let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -1691,7 +1965,9 @@ async fn read_notes(arguments: &str) -> Result<Value> {
 
 async fn search_notes(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
-    struct Args { query: String }
+    struct Args {
+        query: String,
+    }
     let args: Args = parse_args(arguments)?;
     let query = args.query.to_lowercase();
     let dir = notes_dir()?;
@@ -1699,14 +1975,21 @@ async fn search_notes(arguments: &str) -> Result<Value> {
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
             let content = fs::read_to_string(&path).unwrap_or_default();
-            let matching: Vec<&str> = content.lines()
+            let matching: Vec<&str> = content
+                .lines()
                 .filter(|l| l.to_lowercase().contains(&query))
                 .take(3)
                 .collect();
             if !matching.is_empty() {
-                let key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let key = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
                 results.push(json!({ "key": key, "matches": matching }));
             }
         }
@@ -1716,10 +1999,14 @@ async fn search_notes(arguments: &str) -> Result<Value> {
 
 async fn delete_note(arguments: &str) -> Result<Value> {
     #[derive(Deserialize)]
-    struct Args { key: String }
+    struct Args {
+        key: String,
+    }
     let args: Args = parse_args(arguments)?;
     let path = notes_dir()?.join(sanitize_key(&args.key) + ".md");
-    if !path.exists() { bail!("note '{}' not found", args.key); }
+    if !path.exists() {
+        bail!("note '{}' not found", args.key);
+    }
     fs::remove_file(&path)?;
     Ok(json!({ "ok": true, "key": args.key }))
 }
@@ -1729,7 +2016,8 @@ async fn delete_note(arguments: &str) -> Result<Value> {
 /// Streaming run_command: calls `on_line` with each output line as it arrives.
 /// Returns the same JSON as `run_command` but streams progress via the callback.
 pub async fn run_command_with_progress<F>(arguments: &str, mut on_line: F) -> String
-where F: FnMut(String)
+where
+    F: FnMut(String),
 {
     match run_command_streaming_impl(arguments, &mut on_line).await {
         Ok(v) => v.to_string(),
@@ -1738,16 +2026,24 @@ where F: FnMut(String)
 }
 
 async fn run_command_streaming_impl<F>(arguments: &str, on_line: &mut F) -> Result<Value>
-where F: FnMut(String)
+where
+    F: FnMut(String),
 {
     use tokio::io::AsyncBufReadExt;
 
     #[derive(Deserialize)]
-    struct Args { command: String, #[serde(default)] timeout_secs: Option<u64> }
+    struct Args {
+        command: String,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    }
     let args: Args = parse_args(arguments)?;
-    if args.command.trim().is_empty() { bail!("command is empty"); }
+    if args.command.trim().is_empty() {
+        bail!("command is empty");
+    }
 
-    let timeout_secs = args.timeout_secs
+    let timeout_secs = args
+        .timeout_secs
         .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
         .min(MAX_COMMAND_TIMEOUT_SECS);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
@@ -2101,13 +2397,17 @@ async fn screenshot_url(arguments: &str) -> Result<Value> {
     }
     let args: Args = parse_args(arguments)?;
     let url = args.url.trim().to_string();
-    if url.is_empty() { bail!("url is required"); }
+    if url.is_empty() {
+        bail!("url is required");
+    }
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let output = args.output.unwrap_or_else(|| format!("/tmp/anveesa-screenshot-{ts}.png"));
+    let output = args
+        .output
+        .unwrap_or_else(|| format!("/tmp/anveesa-screenshot-{ts}.png"));
     let width = args.width.unwrap_or(1440);
     let height = args.height.unwrap_or(900);
     let viewport = format!("{width},{height}");
@@ -2122,7 +2422,8 @@ async fn screenshot_url(arguments: &str) -> Result<Value> {
     let result = cmd.output().await;
     match result {
         Ok(out) if out.status.success() => {
-            let size_kb = tokio::fs::metadata(&output).await
+            let size_kb = tokio::fs::metadata(&output)
+                .await
                 .map(|m| m.len() / 1024)
                 .unwrap_or(0);
             Ok(json!({
@@ -2140,7 +2441,9 @@ async fn screenshot_url(arguments: &str) -> Result<Value> {
             bail!("playwright failed (exit {}): {}", out.status, stderr.trim())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!("playwright not found — install with: npm install -g playwright && npx playwright install chromium")
+            bail!(
+                "playwright not found — install with: npm install -g playwright && npx playwright install chromium"
+            )
         }
         Err(e) => bail!("failed to run playwright: {e}"),
     }
@@ -2235,7 +2538,9 @@ mod tests {
         // Non-sensitive paths — including the false-positive the old "secret" check caused
         assert!(!is_sensitive_path(Path::new("/proj/src/main.rs")));
         assert!(!is_sensitive_path(Path::new("/proj/src/secret_manager.rs")));
-        assert!(!is_sensitive_path(Path::new("/proj/docs/secret_rotation.md")));
+        assert!(!is_sensitive_path(Path::new(
+            "/proj/docs/secret_rotation.md"
+        )));
     }
 
     #[test]
