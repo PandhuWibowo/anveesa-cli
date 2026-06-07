@@ -300,12 +300,12 @@ pub fn read_clipboard_text() -> Option<String> {
         ("xclip", vec!["-o", "-selection", "clipboard"]),
         ("xsel", vec!["--clipboard", "--output"]),
     ] {
-        if let Ok(out) = std::process::Command::new(cmd).args(args).output() {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout).into_owned();
-                if !text.is_empty() {
-                    return Some(text);
-                }
+        if let Ok(out) = std::process::Command::new(cmd).args(args).output()
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            if !text.is_empty() {
+                return Some(text);
             }
         }
     }
