@@ -1,6 +1,6 @@
 {
   "name": "anveesa",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Multi-provider terminal AI assistant — TUI, web UI, and one-shot mode backed by any OpenAI-compatible API",
   "license": "MIT",
   "repository": {
