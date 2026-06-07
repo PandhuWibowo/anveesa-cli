@@ -1,74 +1,123 @@
-# Publishing Anveesa to npm
+# npm publishing guide — anveesa
 
-## Prerequisites
+## How it works
 
-1. **Install Node.js** (>=16)
-2. **Install Rust** (untuk build binary)
+The npm package (`package.json` at repo root) is a thin wrapper around the Rust binary. It does **not** bundle the binary itself. On `npm install`, the postinstall script (`scripts/install.js`) runs and either:
+
+1. Downloads the correct pre-built binary from the matching GitHub Release, or
+2. Falls back to `cargo build --release` if no pre-built binary is available.
+
+## Package structure
+
+```
+anveesa-cli/
+├── package.json          ← npm package manifest (root-level)
+├── bin/
+│   └── anveesa.js        ← bin entry point: finds and execs the Rust binary
+├── scripts/
+│   └── install.js        ← postinstall: downloads binary or builds from source
+└── README.md             ← included in the npm tarball
+```
+
+> **Note:** The `npm/` directory is a leftover scaffold. The active npm package is the root `package.json`.
+
+## Supported platforms
+
+| Platform | Binary target |
+|---|---|
+| macOS arm64 | `aarch64-apple-darwin` |
+| macOS x86_64 | `x86_64-apple-darwin` |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux arm64 | `aarch64-unknown-linux-gnu` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+## GitHub Release asset naming
+
+The install script downloads:
+
+```
+anveesa-{version}-{target}.tar.gz
+```
+
+For example, for version `0.7.0` on macOS arm64:
+
+```
+anveesa-0.7.0-aarch64-apple-darwin.tar.gz
+```
+
+Each archive contains a single binary named `anveesa` (or `anveesa.exe` on Windows).
+
+## Publishing a new version
+
+### Automated (recommended)
+
+1. Bump `version` in **both** `Cargo.toml` and `package.json` to the same value
+2. Run final checks:
    ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   cargo fmt && cargo clippy -- -D warnings && cargo test
    ```
-3. **Install npm** (global npm registry)
+3. Commit, tag, and push:
    ```bash
-   npm config set registry https://registry.npmjs.org
+   git add Cargo.toml Cargo.lock package.json
+   git commit -m "feat: vX.Y.Z — ..."
+   git tag vX.Y.Z
+   git push origin main --tags
    ```
+4. GitHub Actions (`release.yml`) automatically:
+   - Builds binaries for all 5 platforms
+   - Uploads them to GitHub Release `vX.Y.Z`
+   - Runs `npm publish` via the `NPM_TOKEN` secret
+   - Runs `cargo publish` via the `CARGO_REGISTRY_TOKEN` secret
 
-## Build the Binary
+### Manual (if CI secrets not configured)
 
-```bash
-npm run build
-```
-
-## Publish to npm
-
-The npm installer downloads prebuilt binaries from the GitHub release that
-matches `package.json` exactly. For `0.2.7`, the release tag must be `v0.2.7`
-and must contain assets named like:
-
-```text
-anveesa-0.2.7-aarch64-apple-darwin.tar.gz
-anveesa-0.2.7-x86_64-apple-darwin.tar.gz
-anveesa-0.2.7-x86_64-unknown-linux-gnu.tar.gz
-anveesa-0.2.7-aarch64-unknown-linux-gnu.tar.gz
-anveesa-0.2.7-x86_64-pc-windows-msvc.tar.gz
-```
+After the GitHub Release binaries are uploaded (wait ~5 min after pushing the tag):
 
 ```bash
-# Login ke npm registry (jika belum)
-npm login
-
-# 1. Commit the version you want to publish
-git tag v$(node -p "require('./package.json').version")
-git push origin main --tags
-
-# 2. Wait for the GitHub "Release Binaries" workflow to finish
-
-# 3. Publish
-npm publish
+npm publish --access public
 ```
 
-## Notes
-
-- Binary platform-specific tidak di-include langsung di npm package.
-- Saat install, `scripts/install.js` akan download binary dari GitHub release.
-- Jika release asset belum ada, installer akan fallback build dari source.
-- User hanya perlu Rust kalau prebuilt binary untuk versi/platform itu belum ada.
-- Binary akan otomatis terdeteksi oleh `anveesa.js` di `bin/`
-
-## Alternative: Use Cargo Publish
-
-Jika ingin publish Rust binary langsung ke crates.io:
+You must be logged in as `pandhuw`:
 
 ```bash
-cargo publish
+npm whoami   # should print: pandhuw
+npm login    # if not logged in
 ```
 
-Ini akan publish ke crates.io, bukan npm.
+## GitHub Secrets required for automated publishing
 
-## Post-Publish
+| Secret name | Where to get it | Used for |
+|---|---|---|
+| `NPM_TOKEN` | `npm token create --type=automation` | `npm publish` in CI |
+| `CARGO_REGISTRY_TOKEN` | crates.io → Account Settings → API Tokens | `cargo publish` in CI |
 
-Setelah publish, user bisa install dengan:
+Add both at: **GitHub → repo → Settings → Secrets and variables → Actions**
+
+## Verifying a publish
 
 ```bash
-npm install anveesa -g  # untuk global CLI
-npm install anveesa      # untuk programmatic use
+npm view anveesa dist-tags        # should show latest: X.Y.Z
+npm view anveesa X.Y.Z            # confirm version details
+```
+
+After `npm install -g anveesa`, the binary is installed at:
+
+- **macOS/Linux:** `$(npm root -g)/../bin/anveesa` → delegates to `bin/anveesa.js`
+- **Windows:** `%APPDATA%\npm\anveesa.cmd`
+
+## Troubleshooting
+
+**"No prebuilt binary for this version"**
+The install script falls back to `cargo build --release`. If Rust is not installed, it exits with an error and a link to the GitHub Release page for manual download.
+
+**"HTTP 404" during install**
+The GitHub Release for that version doesn't exist yet. Wait for the release workflow to complete, then re-run `npm install -g anveesa`.
+
+**"Permission denied" on macOS**
+Run with `sudo npm install -g anveesa` or use a Node version manager (nvm/fnm) to avoid needing sudo.
+
+**Updating the install script logic**
+Edit `scripts/install.js`. The binary download URL is constructed as:
+```
+https://github.com/PandhuWibowo/anveesa-cli/releases/download/v{version}/anveesa-{version}-{target}.tar.gz
 ```
