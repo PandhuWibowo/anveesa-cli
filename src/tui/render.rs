@@ -520,25 +520,14 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         lines.push(Line::from(""));
     }
 
-    // Estimate visual rows (accounting for line wrapping) for accurate auto-scroll
-    let visual_rows: usize = if width == 0 {
-        lines.len()
-    } else {
-        lines
-            .iter()
-            .map(|l| {
-                let chars: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
-                if chars == 0 { 1 } else { chars.div_ceil(width) }
-            })
-            .sum()
-    };
-
     let total = lines.len();
     app.view.total_lines = total;
     let visible = area.height as usize;
     let scroll = if app.view.auto_scroll || app.view.scroll == usize::MAX {
-        // Use visual-row estimate to scroll accurately to the bottom
-        visual_rows.saturating_sub(visible)
+        // Auto-scroll: use logical line count, not visual-row estimate.
+        // visual_rows fluctuates as streaming tokens arrive (wrapping changes),
+        // causing scroll jitter. total (logical lines) is stable during streaming.
+        total.saturating_sub(visible)
     } else {
         app.view.scroll.min(total.saturating_sub(1))
     };

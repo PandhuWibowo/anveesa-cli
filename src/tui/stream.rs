@@ -287,6 +287,8 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             flush_streaming_buf(app);
             app.view.messages.push(Msg::Error(msg));
             app.mode = Mode::Input;
+            app.view.auto_scroll = true;   // Reset for next turn.
+            app.view.scroll = usize::MAX;
             app.live.tool_status.clear();
         }
         TuiEvent::PlanSet(tasks) => {
@@ -401,6 +403,8 @@ pub(super) fn finish_turn(app: &mut App) {
         super::render::send_desktop_notification("anveesa", "Task complete");
     }
     app.mode = Mode::Input;
+    app.view.auto_scroll = true;   // Next turn should auto-scroll by default.
+    app.view.scroll = usize::MAX;  // Reset scroll so render.rs picks the bottom.
     app.live.tool_status.clear();
     app.live.streaming_started_at = None;
     app.live.tool_started_at = None;

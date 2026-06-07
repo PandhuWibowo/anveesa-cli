@@ -425,9 +425,19 @@ async fn handle_key(
             }
             KeyCode::PageDown => {
                 app.view.scroll = app.view.scroll.saturating_add(10);
-                if app.view.scroll >= app.view.total_lines {
+                // Re-enable auto-scroll when reaching the bottom
+                if app.view.scroll >= app.view.total_lines.saturating_sub(10) {
                     app.view.auto_scroll = true;
+                    app.live.unread_count = 0;
                 }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.view.auto_scroll = false;
+                app.view.scroll = app.view.scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.view.auto_scroll = false;
+                app.view.scroll = app.view.scroll.saturating_sub(1);
             }
             _ => {}
         }
