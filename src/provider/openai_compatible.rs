@@ -1365,7 +1365,20 @@ fn assistant_tool_message(state: &StreamState) -> Value {
 
 fn is_tool_parameter_error(body: &str) -> bool {
     let lower = body.to_lowercase();
-    lower.contains("tool") || lower.contains("function call")
+    // Only disable tools when the provider explicitly rejects the tool/function schema.
+    // Avoid matching generic errors that happen to mention "tool" (e.g. timeout messages,
+    // context-length errors, routing errors) — those should surface as real errors, not
+    // silently strip tools and produce a confusing text-only retry.
+    lower.contains("does not support tool")
+        || lower.contains("does not support function")
+        || lower.contains("tool_choice is not supported")
+        || lower.contains("tools is not supported")
+        || lower.contains("tool use is not supported")
+        || lower.contains("function calling is not supported")
+        || lower.contains("function_call is not supported")
+        || lower.contains("invalid parameter: tools")
+        || lower.contains("unknown parameter: tools")
+        || lower.contains("extra inputs are not permitted") && lower.contains("tool")
 }
 
 fn is_stream_options_error(body: &str) -> bool {
@@ -1554,7 +1567,17 @@ mod tests {
 
     #[test]
     fn detects_parameter_errors() {
+        // True positives — explicit schema rejection
         assert!(is_tool_parameter_error("This model does not support tools"));
+        assert!(is_tool_parameter_error("does not support function calling"));
+        assert!(is_tool_parameter_error("tool_choice is not supported"));
+        assert!(is_tool_parameter_error("invalid parameter: tools"));
+        assert!(is_tool_parameter_error("unknown parameter: tools"));
+        // False-positive guard — generic errors that mention "tool" must NOT disable tools
+        assert!(!is_tool_parameter_error("tool call timed out"));
+        assert!(!is_tool_parameter_error("your tool result exceeded the context window"));
+        assert!(!is_tool_parameter_error("OpenAIException: unexpected content after document"));
+        assert!(!is_tool_parameter_error("rate limit exceeded"));
         assert!(is_stream_options_error("Unknown field stream_options"));
         assert!(!is_stream_options_error("rate limit exceeded"));
     }
