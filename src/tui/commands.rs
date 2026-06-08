@@ -42,10 +42,16 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
         "/help" => {
             app.view.messages.push(Msg::System(
                 "Commands:\n\
-                 /add <file>   inject a file into context (Aider-style)\n\
+                 /add <file>   inject file into context\n\
+                 /agent [on|off]  toggle auto-approve\n\
+                 /branch         show git branch info\n\
+                 /commit [msg] stage all + commit\n\
+                 /cost           token usage & estimated cost\n\
                  /diff         show git diff HEAD\n\
-                 /commit [msg] stage all + commit (omit msg to ask AI)\n\
                  /memory <txt> save a note to .anveesa.md\n\
+                 /note set k v   save a persistent note\n\
+                 /note get k     load note into context\n\
+                 /notes          list saved notes\n\
                  /clear        reset conversation\n\
                  /undo         restore last file changed by AI\n\
                  /compact      drop old turns to free context\n\
@@ -53,15 +59,14 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                  /export [path] save conversation as markdown\n\
                  /model [name] · /provider [name] · /status · /exit\n\
                  \n\
-                 Keys: ↑/↓ history  ←/→ cursor  Home/End  Shift+Enter newline\n\
-                 Tab     complete /command, /provider name, or file path\n\
-                 Ctrl+R  search conversation  (or /search)\n\
-                 [ ]     navigate between diffs/thinking  Enter expand/collapse\n\
-                 j/k scroll (when input empty)  PageUp/Dn scroll\n\
-                 ⌘V (macOS) / Ctrl+V  paste image or text\n\
-                 Ctrl+W delete-word  Ctrl+U clear line\n\
+                 Keys: ↑/↓ history  ←/→ cursor  Shift+Enter newline\n\
+                 Tab     complete /command, /provider, or file path\n\
+                 Ctrl+R  search  [ ] expand/collapse diffs\n\
+                 j/k scroll  PageUp/Dn scroll\n\
+                 ⌘V/Ctrl+V paste image  Ctrl+W del-word  Ctrl+U clear\n\
                  \n\
-                 Search: set BRAVE_SEARCH_API_KEY or SERPER_API_KEY for better results"
+                 Custom: .anveesa/commands/<name>.md\n\
+                 Search: set BRAVE_SEARCH_API_KEY or SERPER_API_KEY"
                     .into(),
             ));
             app.kbd.input.clear();
@@ -510,6 +515,293 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
             true
         }
 
+        // ── /note set <key> <value> — persist a project note ────────────────────
+        s if s.starts_with("/note set ") => {
+            let rest = s.strip_prefix("/note set ").unwrap().trim();
+            if let Some((key, value)) = rest.split_once(' ') {
+                let key = key.trim();
+                let value = value.trim();
+                if let Ok(path) = crate::config::config_path() {
+                    let notes_dir = path.parent().unwrap().join("notes");
+                    let _ = fs::create_dir_all(&notes_dir);
+                    let note_path = notes_dir.join(format!("{key}.md"));
+                    match fs::write(&note_path, format!("# {}\n\n{}\n", key, value)) {
+                        Ok(()) => app.view.messages.push(Msg::System(format!(
+                            "Note saved: {key}"
+                        ))),
+                        Err(e) => app.view.messages.push(Msg::Error(format!(
+                            "Cannot save note: {e}"
+                        ))),
+                    }
+                } else {
+                    app.view.messages.push(Msg::Error("Cannot locate config directory.".into()));
+                }
+            } else {
+                app.view.messages.push(Msg::System(
+                    "Usage: /note set <key> <value>".into(),
+                ));
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+        // ── /note get <key> — read a saved note into context ────────────────────
+        s if s.starts_with("/note get ") => {
+            let key = s.strip_prefix("/note get ").unwrap().trim();
+            if let Ok(path) = crate::config::config_path() {
+                let note_path = path.parent().unwrap().join("notes").join(format!("{key}.md"));
+                match fs::read_to_string(&note_path) {
+                    Ok(content) => {
+                        let capped: String = content.chars().take(8_000).collect();
+                        app.conv
+                            .history
+                            .push(ChatMessage::user(format!(
+                                "[Context note ({key}):\n\n{capped}]"
+                            )));
+                        app.view.messages.push(Msg::System(format!(
+                            "Loaded note: {key} ({})",
+                            capped.lines().count()
+                        )));
+                    }
+                    Err(_) => app.view.messages.push(Msg::Error(format!(
+                        "Note not found: {key}"
+                    ))),
+                }
+            } else {
+                app.view.messages.push(Msg::Error("Cannot locate config directory.".into()));
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+        // ── /note list — show all saved notes ───────────────────────────────────
+        "/note list" | "/notes" => {
+            if let Ok(path) = crate::config::config_path() {
+                let notes_dir = path.parent().unwrap().join("notes");
+                if notes_dir.exists() {
+                    let keys: Vec<String> = fs::read_dir(&notes_dir)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|e| {
+                            let p = e.ok()?.path();
+                            if p.extension().and_then(|e| e.to_str()) == Some("md") {
+                                p.file_stem().and_then(|s| s.to_str().map(str::to_string))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if keys.is_empty() {
+                        app.view.messages.push(Msg::System("No saved notes.".into()));
+                    } else {
+                        app.view.messages.push(Msg::System(format!(
+                            "Saved notes ({}) — use /note get <key> to load: {}",
+                            keys.len(),
+                            keys.join(", ")
+                        )));
+                    }
+                } else {
+                    app.view.messages.push(Msg::System("No saved notes yet.".into()));
+                }
+            } else {
+                app.view.messages.push(Msg::Error("Cannot locate config directory.".into()));
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+        // ── /note delete <key> — remove a saved note ────────────────────────────
+        s if s.starts_with("/note delete ") => {
+            let key = s.strip_prefix("/note delete ").unwrap().trim();
+            if let Ok(path) = crate::config::config_path() {
+                let note_path = path.parent().unwrap().join("notes").join(format!("{key}.md"));
+                match fs::remove_file(&note_path) {
+                    Ok(()) => app.view.messages.push(Msg::System(format!(
+                        "Deleted note: {key}"
+                    ))),
+                    Err(_) => app.view.messages.push(Msg::Error(format!(
+                        "Note not found: {key}"
+                    ))),
+                }
+            } else {
+                app.view.messages.push(Msg::Error("Cannot locate config directory.".into()));
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+
+        // ── /agent [on|off|status] — toggle auto-approve mode ──────────────────
+        s if s.starts_with("/agent") => {
+            let arg = s.strip_prefix("/agent").unwrap().trim().to_lowercase();
+            match arg.as_str() {
+                "on" => {
+                    app.policy = crate::provider::ApprovalPolicy::Allow;
+                    app.view.messages.push(Msg::System(
+                        "Agent mode ON: tools will auto-approve. Use /agent off to disable."
+                            .into(),
+                    ));
+                }
+                "off" => {
+                    app.policy = crate::provider::ApprovalPolicy::Prompt;
+                    app.view
+                        .messages
+                        .push(Msg::System("Agent mode OFF: will ask before write/run tools.".into()));
+                }
+                "" => {
+                    let status = match app.policy {
+                        crate::provider::ApprovalPolicy::Allow => "ON (auto-approve)",
+                        crate::provider::ApprovalPolicy::Prompt => "OFF (ask before tools)",
+                        crate::provider::ApprovalPolicy::Deny => "DENIED (no tools)",
+                    };
+                    app.view.messages.push(Msg::System(format!("Agent mode: {status}")));
+                }
+                _ => {
+                    app.view.messages.push(Msg::System(
+                        "Usage: /agent [on|off|status]".into(),
+                    ));
+                }
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+
+        // ── /branch — show git branch info ──────────────────────────────────────
+        "/branch" => {
+            let branch = git(&["branch", "--show-current"]).unwrap_or_default();
+            let remote = git(&["config", "--get", "branch", &branch, "remote"])
+                .unwrap_or_else(|| "origin".to_string());
+            let upstream = git(&["rev-parse", "--abbrev-ref", format!("{remote}/{}", branch).as_str()])
+                .unwrap_or_else(|| "no upstream".to_string());
+            let ahead = git(&["rev-list", "--count", "--right-only", format!("{branch}...{}", upstream).as_str()])
+                .unwrap_or_default();
+            let behind = git(&["rev-list", "--count", "--left-only", format!("{branch}...{}", upstream).as_str()])
+                .unwrap_or_default();
+            let status = format!(
+                "Branch: {} (remote: {remote}/{upstream})  ahead: {}  behind: {}",
+                branch, ahead, behind
+            );
+            app.view.messages.push(Msg::System(status));
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+
+        // ── /cost — show session cost breakdown ─────────────────────────────────
+        "/cost" => {
+            let u = &app.usage;
+            let est = app.session_cost_usd;
+            let prompt_cost = u.prompt_tokens as f64 / 1_000_000.0 * 5.0; // rough: $5/M prompt
+            let comp_cost = u.completion_tokens as f64 / 1_000_000.0 * 15.0; // rough: $15/M completion
+            let total_est = prompt_cost + comp_cost;
+            let cost_line = format!(
+                "Tokens: {}↓ {}↑ {} total\n\
+                 Estimated cost: ~${:.4} (${:.2}/M prompt, ${:.2}/M completion)\n\
+                 Session cost: ${:.4}",
+                u.prompt_tokens, u.completion_tokens, u.total_tokens,
+                total_est, 5.0, 15.0, est.max(total_est),
+            );
+            app.view.messages.push(Msg::System(cost_line));
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+
+        // ── /help - already handled above, fall through ─────────────────────────
+
+        // ── Custom slash commands from .anveesa/commands/*.md ───────────────────
+        s if s.starts_with('/') => {
+            // Extract command name
+            let cmd_name = s.split_whitespace().next().unwrap_or(s).trim_end_matches('/');
+            let cmd_arg = s.strip_prefix(cmd_name).map(|s| s.trim()).unwrap_or("");
+
+            // Look for custom command definition
+            if let Some(cmd) = load_custom_command(cmd_name) {
+                let expanded = if cmd_arg.is_empty() {
+                    cmd.action.clone()
+                } else {
+                    cmd.action.replace("ARG", cmd_arg)
+                };
+                if cmd.description.is_some() {
+                    app.view.messages.push(Msg::System(format!(
+                        "📌 Running custom command: {}",
+                        cmd.description.unwrap_or_default()
+                    )));
+                }
+                if expanded.starts_with('/') {
+                    handle_slash_command(app, &expanded)
+                } else {
+                    app.kbd.input = expanded;
+                    app.kbd.input_cursor = app.kbd.input.len();
+                    true
+                }
+            } else {
+                false // No custom command found, fall through to default
+            }
+        }
+
         _ => false,
+    }
+}
+
+/// Custom command loaded from `.anveesa/commands/<name>.md`
+#[derive(Debug)]
+struct CustomCommand {
+    action: String,
+    description: Option<String>,
+}
+
+/// Load a custom slash command from `.anveesa/commands/<name>.md`
+/// Files should have format:
+/// ```text
+/// # command description
+/// action: /commit "fix: ARG"
+/// ```
+fn load_custom_command(name: &str) -> Option<CustomCommand> {
+    let mut path = std::path::PathBuf::from(".anveesa/commands");
+    path.push(format!("{name}.md"));
+
+    let content: String = (if fs::read_to_string(&path).is_ok() {
+        fs::read_to_string(&path).ok()
+    } else {
+        // Also check at git root
+        std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|git_root| {
+                let root = String::from_utf8_lossy(&git_root.stdout).trim().to_string();
+                path = std::path::PathBuf::from(&root)
+                    .join(".anveesa/commands")
+                    .join(format!("{name}.md"));
+                if path.exists() {
+                    fs::read_to_string(&path).ok()
+                } else {
+                    None
+                }
+            })
+    })?;
+
+    let mut action = String::new();
+    let mut description = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        // First # heading becomes description
+        if line.starts_with('#') && description.is_none() {
+            description = Some(line.trim_start_matches('#').trim().to_string());
+        }
+        // action: <value> sets the command
+        if let Some(rest) = line.strip_prefix("action:") {
+            action = rest.trim().to_string();
+        }
+    }
+
+    if action.is_empty() {
+        None
+    } else {
+        Some(CustomCommand { action, description })
     }
 }
