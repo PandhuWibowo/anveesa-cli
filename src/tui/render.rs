@@ -257,6 +257,10 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut lines: Vec<Line<'static>> = vec![Line::from("")];
     let mut msg_offsets: Vec<usize> = Vec::with_capacity(app.view.messages.len());
     let mut cache = std::mem::take(&mut app.view.render_cache);
+    // Ensure cache is sized for all messages — O(1) index lookups.
+    if cache.len() < app.view.messages.len() {
+        cache.resize_with(app.view.messages.len(), || None);
+    }
 
     for (msg_idx, msg) in app.view.messages.iter().enumerate() {
         msg_offsets.push(lines.len());
@@ -265,29 +269,29 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         match msg {
             Msg::User { text } => {
                 let h = content_hash(&format!("user:{}:{}", msg_idx, text));
-                if let Some((_, _, clines)) = cache.iter().find(|(i, ch, _)| *i == msg_idx && *ch == h) {
-                    lines.extend(clines.iter().cloned());
+                if let Some((_ch, clines)) = cache.get(msg_idx).cloned().and_then(|o| o.filter(|(x, _)| *x == h)) {
+                    lines.extend(clines);
                 } else {
                     let mut ml: Vec<Line<'static>> = vec![user_header()];
                     for l in wrap_text(text, width) {
                         ml.push(Line::from(format!("    {l}")));
                     }
                     ml.push(Line::from(""));
-                    cache.push((msg_idx, h, ml.clone()));
+                    cache[msg_idx] = Some((h, ml.clone()));
                     lines.extend(ml);
                 }
             }
             Msg::Assistant { text } => {
                 let h = content_hash(&format!("assistant:{}:{}", msg_idx, text));
-                if let Some((_, _, clines)) = cache.iter().find(|(i, ch, _)| *i == msg_idx && *ch == h) {
-                    lines.extend(clines.iter().cloned());
+                if let Some((_ch, clines)) = cache.get(msg_idx).cloned().and_then(|o| o.filter(|(x, _)| *x == h)) {
+                    lines.extend(clines);
                 } else {
                     let mut ml: Vec<Line<'static>> = vec![assistant_header(&app.model)];
                     for l in format_assistant_lines(text, width) {
                         ml.push(l);
                     }
                     ml.push(Line::from(""));
-                    cache.push((msg_idx, h, ml.clone()));
+                    cache[msg_idx] = Some((h, ml.clone()));
                     lines.extend(ml);
                 }
             }

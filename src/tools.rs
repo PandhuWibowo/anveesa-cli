@@ -156,6 +156,7 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
         "read_file" => format!("read file {}", field("path")),
         "web_search" => format!("web search `{}`", field("query")),
         "fetch_url" => format!("fetch {}", field("url")),
+        "read_image" => format!("read image {}", field("path")),
         "screenshot_url" => format!("screenshot {}", field("url")),
         "git_status" => "git status".to_string(),
         "git_diff" => {
@@ -200,6 +201,9 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
         "create_dir" => format!("create directory {}", field("path")),
         "write_file" => format!("write file {}", field("path")),
         "edit_file" => format!("edit file {}", field("path")),
+        "glob" => format!("glob `{}` under {}", field("pattern"), field("path").if_empty(".")),
+        "grep" => format!("grep `{}` in {}", field("pattern"), field("path").if_empty(".")),
+        "patch" => format!("patch {}", field("file_path")),
         "run_command" => format!("run command `{}`", field("command")),
         _ => format!("{name} {}", truncate(arguments, 80)),
     }
@@ -371,6 +375,67 @@ pub fn definitions(include_write: bool) -> Vec<Value> {
                         "full_page": { "type": "boolean", "description": "Capture the full scrollable page (default false)." }
                     },
                     "required": ["url"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": "Find files by glob pattern. Supports * (any chars except /), ** (any chars including /), and ? (single char).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Glob pattern to search for. Use ** for recursive search." },
+                        "path": { "type": "string", "description": "Root directory to search from. Defaults to current working directory." }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": "Search file contents using regex patterns. Returns matching lines with file paths and line numbers.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Regex pattern to search for." },
+                        "path": { "type": "string", "description": "File or directory to search in. Defaults to current directory." },
+                        "include": { "type": "string", "description": "File pattern to include (e.g., '*.rs', '*.ts')." },
+                        "context": { "type": "integer", "description": "Number of context lines before/after match (default 0)." }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "patch",
+                "description": "Apply a unified diff patch to a file. Supports adding, removing, and modifying lines.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "Path to the file to patch." },
+                        "diff": { "type": "string", "description": "Unified diff format patch to apply." }
+                    },
+                    "required": ["file_path", "diff"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "read_image",
+                "description": "Read an image file (PNG, JPEG, WebP, GIF) and return base64-encoded data with metadata (mime type, dimensions, file size). Use to inspect screenshots, analyze images, or extract visual information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path to the image. Relative paths resolve from the terminal cwd." }
+                    },
+                    "required": ["path"]
                 }
             }
         }),
@@ -725,6 +790,10 @@ pub async fn run(name: &str, arguments: &str) -> String {
         "edit_file" => edit_file(arguments).await,
         "run_command" => run_command(arguments).await,
         "screenshot_url" => screenshot_url(arguments).await,
+        "read_image" => read_image(arguments).await,
+        "glob" => glob_tool(arguments).await,
+        "grep" => grep_tool(arguments).await,
+        "patch" => patch_file_tool(arguments).await,
         _ => Err(anyhow!("unknown tool '{name}'")),
     };
 
@@ -2512,6 +2581,321 @@ async fn screenshot_url(arguments: &str) -> Result<Value> {
         }
         Err(e) => bail!("failed to run playwright: {e}"),
     }
+}
+
+// ── read_image ─────────────────────────────────────────────────────────────────
+
+/// Read an image file and return its base64-encoded data with metadata.
+///
+/// Supports PNG, JPEG, WebP, and GIF formats. Returns file path, mime type,
+/// base64-encoded data, and file size in KB.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Tool call: {"path": "screenshot.png"}
+/// ```
+async fn read_image(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        path: String,
+    }
+    let args: Args = parse_args(arguments)?;
+    let path = resolve_path(args.path.trim())?;
+
+    if !path.exists() {
+        bail!("file not found: {}", path.display());
+    }
+    if !path.is_file() {
+        bail!("not a file: {}", path.display());
+    }
+
+    let mime = crate::image::image_mime_for_path(&path)
+        .with_context(|| format!("unsupported image type for {}", path.display()))?;
+
+    let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    if bytes.is_empty() {
+        bail!("file is empty: {}", path.display());
+    }
+
+    let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    let size_kb = bytes.len() / 1024;
+
+    Ok(json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "mime": mime,
+        "data": data,
+        "size_kb": size_kb,
+        "note": format!("Image loaded from {}. Size: {} KB. Mime: {}", path.display(), size_kb, mime)
+    }))
+}
+
+/// Search for files matching a glob pattern.
+///
+/// ```ignore
+/// // Tool call: {"pattern": "*.rs", "path": "src"}
+/// ```
+async fn glob_tool(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        pattern: String,
+        path: Option<String>,
+    }
+    let args: Args = parse_args(arguments)?;
+    let root = resolve_path(args.path.as_deref().unwrap_or("."))?;
+
+    if !root.is_dir() {
+        bail!("{} is not a directory", root.display());
+    }
+
+    let entries: Vec<String> = glob::glob_with(
+        &root.join(&args.pattern).to_string_lossy(),
+        glob::MatchOptions::new(),
+    )
+    .map(|iter| {
+        iter.filter_map(|e| {
+            let p = e.ok()?;
+            Some(p.strip_prefix(&root).map_or(p.display().to_string(), |s| s.display().to_string()))
+        })
+        .collect()
+    })
+    .unwrap_or_default();
+
+    let count = entries.len();
+    let mut truncated = false;
+    let listed: Vec<String> = entries
+        .into_iter()
+        .take(MAX_DIR_ENTRIES)
+        .collect();
+    if count > MAX_DIR_ENTRIES {
+        truncated = true;
+    }
+
+    Ok(json!({
+        "ok": true,
+        "pattern": args.pattern,
+        "root": root.display().to_string(),
+        "count": count,
+        "truncated": truncated,
+        "files": listed,
+    }))
+}
+
+/// Search file contents using regex patterns.
+///
+/// ```ignore
+/// // Tool call: {"pattern": "pub fn", "path": "src"}
+/// ```
+async fn grep_tool(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        pattern: String,
+        path: Option<String>,
+        include: Option<String>,
+        context: Option<usize>,
+    }
+    let args: Args = parse_args(arguments)?;
+    let root = resolve_path(args.path.as_deref().unwrap_or("."))?;
+    let ctx_lines = args.context.unwrap_or(0);
+    let include_pat = args.include.as_deref();
+
+    let re = regex::Regex::new(&args.pattern)
+        .with_context(|| format!("invalid regex: {}", args.pattern))?;
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut total_matches = 0;
+
+    fn search_dir(
+        dir: &Path,
+        re: &regex::Regex,
+        include_pat: Option<&str>,
+        ctx: usize,
+        results: &mut Vec<Value>,
+        count: &mut usize,
+    ) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if should_skip_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            if path.is_dir() {
+                search_dir(&path, re, include_pat, ctx, results, count)?;
+            } else if path.is_file() {
+                let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                if let Some(pat) = include_pat
+                    && !glob::Pattern::new(pat)
+                        .map(|p| p.matches(&name))
+                        .unwrap_or(false)
+                {
+                    continue;
+                }
+                let contents = match fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    _ => continue,
+                };
+                let lines: Vec<&str> = contents.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    if re.is_match(line) {
+                        *count += 1;
+                        let start = (i as isize).saturating_sub(ctx as isize) as usize;
+                        let end = std::cmp::min(i + ctx + 1, lines.len());
+                        let matched_lines: Vec<String> = lines[start..end]
+                            .iter()
+                            .enumerate()
+                            .map(|(j, l)| {
+                                let abs_line = start + j + 1;
+                                if abs_line == i + 1 {
+                                    format!("> {}: {}", abs_line, l)
+                                } else {
+                                    format!("  {}: {}", abs_line, l)
+                                }
+                            })
+                            .collect();
+                        if results.len() < 200 {
+                            results.push(json!({
+                                "file": path.display().to_string(),
+                                "line": i + 1,
+                                "lines": matched_lines,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    if root.is_dir() {
+        search_dir(&root, &re, include_pat, ctx_lines, &mut results, &mut total_matches)?;
+    } else {
+        let contents = fs::read_to_string(&root)?;
+        let lines: Vec<&str> = contents.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if re.is_match(line) {
+                total_matches += 1;
+                let start = (i as isize).saturating_sub(ctx_lines as isize) as usize;
+                let end = std::cmp::min(i + ctx_lines + 1, lines.len());
+                let matched_lines: Vec<String> = lines[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(j, l)| {
+                        let abs_line = start + j + 1;
+                        if abs_line == i + 1 {
+                            format!("> {}: {}", abs_line, l)
+                        } else {
+                            format!("  {}: {}", abs_line, l)
+                        }
+                    })
+                    .collect();
+                if results.len() < 200 {
+                    results.push(json!({
+                        "file": root.display().to_string(),
+                        "line": i + 1,
+                        "lines": matched_lines,
+                    }));
+                }
+            }
+        }
+    }
+
+    let truncated = total_matches > 200;
+    Ok(json!({
+        "ok": true,
+        "pattern": args.pattern,
+        "root": root.display().to_string(),
+        "total_matches": total_matches,
+        "truncated": truncated,
+        "results": results,
+    }))
+}
+
+/// Apply a unified diff patch to a file.
+///
+/// ```ignore
+/// // Tool call: {"file_path": "src/lib.rs", "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ ...\n- old\n+ new"}
+/// ```
+async fn patch_file_tool(arguments: &str) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Args {
+        file_path: String,
+        diff: String,
+    }
+    let args: Args = parse_args(arguments)?;
+    let path = resolve_path(args.file_path.trim())?;
+
+    let content = if path.exists() {
+        fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+    } else {
+        bail!("file not found: {}", path.display());
+    };
+
+    // Simple unified diff parser: handle lines starting with "-" (remove) and "+" (add)
+    // Skip header lines (---, +++, @@)
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result: Vec<String> = Vec::new();
+    let mut patch_lines: Vec<&str> = args.diff.lines().collect();
+    let mut current_line = 0;
+    let mut applied = false;
+
+    for patch_line in &mut patch_lines {
+        if patch_line.starts_with("---") || patch_line.starts_with("+++") {
+            continue;
+        }
+        if patch_line.starts_with("@@") {
+            // Skip hunk header, try to align with content
+            continue;
+        }
+        if let Some(old_line) = patch_line.strip_prefix('-') {
+            let mut found = false;
+            while current_line < lines.len() {
+                if lines[current_line] == old_line {
+                    current_line += 1;
+                    found = true;
+                    applied = true;
+                    break;
+                }
+                result.push(lines[current_line].to_string());
+                current_line += 1;
+                if current_line > lines.len().saturating_add(5) {
+                    break;
+                }
+            }
+            if !found {
+                // Couldn't find the line to remove, keep as-is
+                result.push(lines.get(current_line).map_or("".to_string(), |s| s.to_string()));
+            }
+        } else if let Some(new_line) = patch_line.strip_prefix('+') {
+            result.push(new_line.to_string());
+        }
+    }
+
+    // Append remaining lines
+    while current_line < lines.len() {
+        result.push(lines[current_line].to_string());
+        current_line += 1;
+    }
+
+    let new_content = result.join("\n");
+    if !applied {
+        bail!("patch did not apply cleanly to {}", path.display());
+    }
+
+    let new_lines_count = new_content.lines().count();
+    let old_lines_count = lines.len();
+
+    fs::write(&path, &new_content)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+
+    Ok(json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "old_lines": old_lines_count,
+        "new_lines": new_lines_count,
+        "note": format!("patch applied to {} ({} -> {} lines)", path.display(), old_lines_count, new_lines_count)
+    }))
 }
 
 #[cfg(test)]

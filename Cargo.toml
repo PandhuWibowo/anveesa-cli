@@ -1,6 +1,6 @@
 [package]
 name = "anveesa"
-version = "0.7.3"
+version = "0.7.5"
 edition = "2024"
 default-run = "anveesa"
 description = "Multi-provider terminal AI assistant — TUI, web UI, and one-shot mode backed by any OpenAI-compatible API"
@@ -28,3 +28,5 @@ tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "process", "
 tokio-stream = { version = "0.1", features = ["sync"] }
 toml = "0.8"
 axum = { version = "0.7", features = ["json"] }
+glob = "0.3"
+regex = "1.11"

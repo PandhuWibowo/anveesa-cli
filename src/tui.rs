@@ -164,10 +164,12 @@ struct ViewState {
     search_idx: usize,
     search_scroll_saved: usize,
     mouse_capture: bool,
-    /// Cached formatted lines per message index, keyed by content hash.
-    render_cache: Vec<(usize, u64, Vec<ratatui::text::Line<'static>>)>,
+    /// Cached formatted lines per message index: Option<(content_hash, lines)>. Indexed by msg index.
+    render_cache: Vec<Option<(u64, Vec<ratatui::text::Line<'static>>)>>,
     /// Length of streaming_buf last time we rendered (for skip-diff).
     render_cache_streaming_len: usize,
+    /// Last time we rendered during a tool execution (for throttling).
+    last_tool_render: Option<std::time::Instant>,
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -311,6 +313,7 @@ impl App {
                 mouse_capture: true,
                 render_cache: Vec::new(),
                 render_cache_streaming_len: 0,
+                last_tool_render: None,
             },
         }
     }
@@ -334,11 +337,26 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec
         if app.quit {
             break;
         }
-        // Render after state changes; skip on idle spinner tick.
+        // Render after state changes; throttle during tool execution to avoid freeze.
+        let pending = app.live.pending_tool.is_some();
         let needs_render = app.mode != Mode::Streaming
             || app.live.streaming_buf.len() != app.view.render_cache_streaming_len
-            || app.live.pending_tool.is_some();
-        if needs_render || app.mode != Mode::Streaming {
+            || pending;
+        if needs_render {
+            // If a tool is running and no new event arrived, render at ~2 Hz (500 ms)
+            // instead of every 80 ms to keep the UI responsive.
+        if let Some(last) = app.view.last_tool_render
+            && pending
+            && std::time::Instant::now().duration_since(last) < Duration::from_millis(500)
+        {
+            // Throttle — only advance spinner, skip full re-render.
+            app.spinner_frame = app.spinner_frame.wrapping_add(1);
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            continue;
+        }
+        if pending {
+            app.view.last_tool_render = Some(std::time::Instant::now());
+        }
             terminal.draw(|f| render(f, app))?;
             app.view.render_cache_streaming_len = app.live.streaming_buf.len();
         }
