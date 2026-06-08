@@ -6,7 +6,7 @@ This file tells an AI coding agent everything it needs to work on this codebase 
 
 **anveesa** is a Rust CLI (edition 2024) that wraps any OpenAI-compatible AI provider into a unified terminal interface. It has three modes: a full-screen TUI (ratatui), a plain REPL, and a one-shot `anveesa "prompt"` mode. A browser chat UI is available via `anveesa web`.
 
-**Version:** 0.7.0 | **Tests:** 181 passing | **Warnings:** 0
+**Version:** 0.7.5 | **Tests:** 246 passing (237 unit + 9 doc) | **Warnings:** 0
 
 ## Repository layout
 
@@ -21,7 +21,7 @@ anveesa-cli/
 │   ├── mcp.rs              # MCP protocol client
 │   ├── prompt.rs           # Raw terminal line reader (non-TUI REPL)
 │   ├── session.rs          # Session persistence (save/load/purge)
-│   ├── tools.rs            # All 28 AI tool implementations
+│   ├── tools.rs            # All 32 AI tool implementations
 │   ├── tools_scenarios.rs  # Scenario-driven tool tests
 │   ├── web.rs              # axum web server + SSE endpoint
 │   ├── web_ui.html         # Embedded single-file browser UI
@@ -35,13 +35,13 @@ anveesa-cli/
 │       ├── commands.rs     # /add /diff /commit /memory and other slash cmds
 │       ├── format.rs       # Text formatting + cursor helpers
 │       ├── input.rs        # Tab completion, search
-│       ├── render.rs       # ratatui rendering
+│       ├── render.rs       # ratatui rendering (with incremental cache)
 │       └── stream.rs       # submit_prompt, turn management, auto-compact
 ├── Cargo.toml
 ├── package.json            # npm package (root-level, not in npm/)
 ├── scripts/install.js      # npm postinstall: download binary or build from source
 ├── bin/anveesa.js          # npm bin wrapper (finds and execs the Rust binary)
-├── npm/                    # Unused subdirectory – ignore
+├── npm/                    # Deprecated — root package.json is the source of truth
 ├── .github/workflows/
 │   ├── ci.yml              # fmt + clippy + tests (Ubuntu + macOS)
 │   └── release.yml         # Build binaries + npm publish + crates.io on vX.Y.Z tag
@@ -56,7 +56,7 @@ anveesa-cli/
 1. **`cargo build` must produce zero warnings.** Use `#[allow(lint)]` only with a comment explaining why.
 2. **`cargo fmt --check` must pass** — always run `cargo fmt` before committing.
 3. **`cargo clippy -- -D warnings` must pass on Linux** — Ubuntu clippy is stricter than macOS. Test locally too.
-4. **`cargo test` must show 181 passed, 0 failed.**
+4. **`cargo test` must show 246 passed, 0 failed.**
 5. **No logic changes in refactoring PRs** — pure moves only.
 6. **No new dependencies without explicit approval** — Cargo.toml is lean by design.
 
@@ -77,7 +77,7 @@ cargo test
 | `InputState` | `app.kbd` | `input`, `input_cursor`, `input_history`, `hist_idx`, `hist_saved`, `pending_images`, `last_image_fp`, `tab_state` |
 | `StreamState` | `app.live` | `streaming_buf`, `accumulated_response`, `pending_tool`, `tool_status`, `plan_tasks`, `plan_done`, `pending_prompt`, `streaming_started_at`, `tool_started_at`, `unread_count`, `thinking_buf` |
 | `ConvState` | `app.conv` | `history`, `session_path`, `last_saved_at`, `seen_paths`, `undo_stack` |
-| `ViewState` | `app.view` | `messages`, `scroll`, `auto_scroll`, `total_lines`, `msg_focus`, `msg_line_offsets`, `search_query`, `search_results`, `search_idx`, `search_scroll_saved`, `mouse_capture` |
+| `ViewState` | `app.view` | `messages`, `scroll`, `auto_scroll`, `total_lines`, `msg_focus`, `msg_line_offsets`, `search_query`, `search_results`, `search_idx`, `search_scroll_saved`, `mouse_capture`, `render_cache`, `render_cache_streaming_len` |
 
 Top-level `App` keeps: `mode`, `confirm`, `provider`, `model`, `last_model_used`, `usage`, `session_cost_usd`, `cwd`, `images_available`, `config`, `options`, `workspace_context`, `policy`, `mcp`, channels, `quit`, `spinner_frame`.
 
@@ -88,12 +88,16 @@ Top-level `App` keeps: `mode`, `confirm`, `provider`, `model`, `last_model_used`
 3. Update the `/help` text in `commands.rs`
 4. If it needs tab completion (e.g., file paths), add a branch in `compute_tab_completions` in `input.rs`
 
+**Custom commands:** Users can create `~/.anveesa/commands/*.md` files. These are auto-discovered and registered as `/filename` commands (filename becomes the command name). No code changes needed.
+
 ## Adding a new tool
 
-1. Add a `pub fn` in `src/tools.rs` following the existing pattern
+1. Add a `pub async fn` in `src/tools.rs` following the existing pattern
 2. Add it to `definitions()` (always) and optionally mark it write-only in `is_write_tool()`
-3. Add a scenario block in `src/tools_scenarios.rs`
-4. Wire the call in `openai_compatible.rs` in the tool dispatch match
+3. Add it to `describe_call()` for user-facing descriptions
+4. Wire the call in the `run()` dispatch match (async for new tools)
+5. Add a scenario block in `src/tools_scenarios.rs`
+6. Wire the call in `openai_compatible.rs` in the tool dispatch match
 
 ## Adding a new provider kind
 
@@ -107,6 +111,7 @@ Top-level `App` keeps: `mode`, `confirm`, `provider`, `model`, `last_model_used`
 # 1. Bump versions
 vim Cargo.toml        # version = "X.Y.Z"
 vim package.json      # "version": "X.Y.Z"
+vim npm/package.json  # "version": "X.Y.Z"
 cargo build           # updates Cargo.lock
 
 # 2. Test + lint
@@ -127,3 +132,5 @@ npm publish           # uses pandhuw npm account
 - `auto_compact_if_needed` in `stream.rs` MUST inject a `ChatMessage::user` context note before draining history, or the model loses orientation. Do not remove that insert.
 - The `#[allow(unused_assignments)]` on `last_effective_model` in `openai_compatible.rs` is intentional — Rust can't prove the `loop` body runs at least once, but it always does.
 - `pub conv: ConvState` on App is `pub(crate)` (not fully pub) to avoid leaking private types.
+- **Render cache:** `app.view.render_cache` is a `Vec<(usize, u64, Vec<Line>)>` — message index, content hash, cached lines. O(1) lookup by index. Only re-format messages whose hash changed. During streaming, only the last streaming buffer gets re-formatted per frame.
+- **Tool render throttling:** When `pending_tool.is_some()`, renders are throttled to ~2Hz (500ms interval) to avoid freeze during long-running tool execution.
