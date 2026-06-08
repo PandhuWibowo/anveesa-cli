@@ -708,6 +708,167 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
             true
         }
 
+        // ── /plan <prompt> — AI generates an execution plan ──────────────────────
+        s if s.starts_with("/plan ") => {
+            let prompt = s.strip_prefix("/plan ").unwrap().trim().to_string();
+            if prompt.is_empty() {
+                app.view.messages.push(Msg::System(
+                    "Usage: /plan <what to build>".into(),
+                ));
+            } else {
+                app.view.messages.push(Msg::System(format!(
+                    "Generating plan for: {prompt}...",
+                )));
+                let tx = app.stream_tx.clone();
+                let config = app.config.clone();
+                let provider_name = app.provider.clone();
+                let ctx = app.workspace_context.clone();
+                tokio::spawn(async move {
+                    let (dummy_tx, _) =
+                        tokio::sync::mpsc::unbounded_channel::<crate::provider::StreamEvent>();
+                    let request = PromptRequest {
+                        prompt: format!(
+                            "Create a numbered execution plan for: {prompt}\n\nRules:\n1. Number each step 1, 2, 3\n2. Each step is one actionable task\n3. Include file paths when relevant\n4. Prefix each step with [read] [write] or [run]\n5. Output ONLY the numbered list, no preamble\nProject context:\n{}" ,
+                            ctx.as_deref().unwrap_or("")
+                        ),
+                        model: None,
+                        system: Some("You are a precise task planner. Output only numbered steps.".into()),
+                        workspace_context: None,
+                        history: vec![],
+                        images: vec![],
+                        mcp: None,
+                    };
+                    if let Ok(result) = crate::provider::ask(
+                        &config, &provider_name, request,
+                        ApprovalPolicy::Deny, &dummy_tx,
+                    ).await {
+                        let steps: Vec<String> = result.text.lines()
+                            .filter_map(|l| {
+                                let t = l.trim();
+                                if t.starts_with(|c: char| c.is_ascii_digit()) && t.contains('.') {
+                                    Some(t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.').trim().to_string())
+                                } else { None }
+                            })
+                            .collect();
+                        if steps.is_empty() {
+                            let _ = tx.send(TuiEvent::SystemMsg(format!("Plan:\n{}", result.text.trim())));
+                        } else {
+                            let _ = tx.send(TuiEvent::PlanSet(steps.clone()));
+                            let numbered = steps.iter()
+                                .map(|s| format!("  [ ] {}", s))
+                                .collect::<Vec<_>>().join("\n");
+                            let _ = tx.send(TuiEvent::SystemMsg(format!(
+                                "Plan created ({} steps):\n\n{}", steps.len(), numbered
+                            )));
+                        }
+                    }
+                });
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+
+        // ── /brain — AI-powered project knowledge dump ───────────────────────────
+        "/brain" => {
+            app.view.messages.push(Msg::System("Analyzing project context…".into()));
+            let tx = app.stream_tx.clone();
+            let config = app.config.clone();
+            let provider_name = app.provider.clone();
+            let ctx = app.workspace_context.clone();
+            tokio::spawn(async move {
+                let (dummy_tx, _) =
+                    tokio::sync::mpsc::unbounded_channel::<crate::provider::StreamEvent>();
+                let request = PromptRequest {
+                    prompt: format!(
+                        "Analyze this project: purpose, tech stack, architecture, key files, build/test/run instructions, conventions, limitations. Be concise. Use markdown.\n\nProject context:\n{}",
+                        ctx.as_deref().unwrap_or("No context.")
+                    ),
+                    model: None,
+                    system: Some("Project analyst: create a concise knowledge base.".into()),
+                    workspace_context: None,
+                    history: vec![],
+                    images: vec![],
+                    mcp: None,
+                };
+                if let Ok(result) = crate::provider::ask(
+                    &config, &provider_name, request,
+                    ApprovalPolicy::Deny, &dummy_tx,
+                ).await {
+                    let _ = tx.send(TuiEvent::SystemMsg(format!(
+                        "Project Brain:\n\n{}", result.text.trim()
+                    )));
+                }
+            });
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+
+        // ── /arch — ASCII codebase architecture map ──────────────────────────────
+        "/arch" => {
+            app.view.messages.push(Msg::System("Generating architecture map…".into()));
+            let tx = app.stream_tx.clone();
+            let config = app.config.clone();
+            let provider_name = app.provider.clone();
+            let ctx = app.workspace_context.clone();
+            tokio::spawn(async move {
+                let (dummy_tx, _) =
+                    tokio::sync::mpsc::unbounded_channel::<crate::provider::StreamEvent>();
+                let request = PromptRequest {
+                    prompt: format!(
+                        "ASCII architecture diagram: modules, dependencies, data flow, entry points. Use box-drawing chars and arrows. Under 40 lines.\n\nContext:\n{}",
+                        ctx.as_deref().unwrap_or("No context.")
+                    ),
+                    model: None,
+                    system: Some("Create ASCII architecture diagrams with box-drawing chars.".into()),
+                    workspace_context: None,
+                    history: vec![],
+                    images: vec![],
+                    mcp: None,
+                };
+                if let Ok(result) = crate::provider::ask(
+                    &config, &provider_name, request,
+                    ApprovalPolicy::Deny, &dummy_tx,
+                ).await {
+                    let _ = tx.send(TuiEvent::SystemMsg(format!(
+                        "Architecture Map:\n\n```\n{}\n```", result.text.trim()
+                    )));
+                }
+            });
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+
+        // ── /export text — export conversation as plain text ─────────────────────
+        s if s.starts_with("/export text") => {
+            let arg = s.strip_prefix("/export text").unwrap().trim();
+            let path = if arg.is_empty() {
+                std::path::PathBuf::from(format!("anveesa-export-{}.txt", unix_now()))
+            } else {
+                std::path::PathBuf::from(arg)
+            };
+            let text = app.conv.history.iter().map(|m| {
+                let role = match m.role {
+                    crate::provider::ChatRole::User => "[You]",
+                    crate::provider::ChatRole::Assistant => "[AI]",
+                };
+                format!("{} {}", role, m.content)
+            }).collect::<Vec<_>>().join("\n\n");
+            match std::fs::write(&path, &text) {
+                Ok(()) => app.view.messages.push(Msg::System(format!(
+                    "Exported plain text → {} ({} chars)", path.display(), text.len()
+                ))),
+                Err(e) => app.view.messages.push(Msg::Error(format!("export failed: {e:#}"))),
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+
+        // ── /help - already handled above, fall through ─────────────────────────
+
         // ── /help - already handled above, fall through ─────────────────────────
 
         // ── Custom slash commands from .anveesa/commands/*.md ───────────────────
