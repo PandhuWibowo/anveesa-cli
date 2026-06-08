@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use super::format::{format_assistant_lines, wrap_text};
+use super::format::{content_hash, format_assistant_lines, wrap_text};
 use super::{App, Mode, Msg};
 
 pub(super) fn render(frame: &mut Frame, app: &mut App) {
@@ -256,6 +256,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width.saturating_sub(4) as usize;
     let mut lines: Vec<Line<'static>> = vec![Line::from("")];
     let mut msg_offsets: Vec<usize> = Vec::with_capacity(app.view.messages.len());
+    let mut cache = std::mem::take(&mut app.view.render_cache);
 
     for (msg_idx, msg) in app.view.messages.iter().enumerate() {
         msg_offsets.push(lines.len());
@@ -263,18 +264,32 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         let _ = focused; // used below in FileOp branch
         match msg {
             Msg::User { text } => {
-                lines.push(user_header());
-                for l in wrap_text(text, width) {
-                    lines.push(Line::from(format!("    {l}")));
+                let h = content_hash(&format!("user:{}:{}", msg_idx, text));
+                if let Some((_, _, clines)) = cache.iter().find(|(i, ch, _)| *i == msg_idx && *ch == h) {
+                    lines.extend(clines.iter().cloned());
+                } else {
+                    let mut ml: Vec<Line<'static>> = vec![user_header()];
+                    for l in wrap_text(text, width) {
+                        ml.push(Line::from(format!("    {l}")));
+                    }
+                    ml.push(Line::from(""));
+                    cache.push((msg_idx, h, ml.clone()));
+                    lines.extend(ml);
                 }
-                lines.push(Line::from(""));
             }
             Msg::Assistant { text } => {
-                lines.push(assistant_header(&app.model));
-                for l in format_assistant_lines(text, width) {
-                    lines.push(l);
+                let h = content_hash(&format!("assistant:{}:{}", msg_idx, text));
+                if let Some((_, _, clines)) = cache.iter().find(|(i, ch, _)| *i == msg_idx && *ch == h) {
+                    lines.extend(clines.iter().cloned());
+                } else {
+                    let mut ml: Vec<Line<'static>> = vec![assistant_header(&app.model)];
+                    for l in format_assistant_lines(text, width) {
+                        ml.push(l);
+                    }
+                    ml.push(Line::from(""));
+                    cache.push((msg_idx, h, ml.clone()));
+                    lines.extend(ml);
                 }
-                lines.push(Line::from(""));
             }
             Msg::Tool {
                 done,
@@ -457,6 +472,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    app.view.render_cache = cache;
     app.view.msg_line_offsets = msg_offsets;
 
     // Live pending tool (running, not yet committed) — animated with elapsed time

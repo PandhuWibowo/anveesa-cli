@@ -164,6 +164,10 @@ struct ViewState {
     search_idx: usize,
     search_scroll_saved: usize,
     mouse_capture: bool,
+    /// Cached formatted lines per message index, keyed by content hash.
+    render_cache: Vec<(usize, u64, Vec<ratatui::text::Line<'static>>)>,
+    /// Length of streaming_buf last time we rendered (for skip-diff).
+    render_cache_streaming_len: usize,
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -305,6 +309,8 @@ impl App {
                 search_idx: 0,
                 search_scroll_saved: 0,
                 mouse_capture: true,
+                render_cache: Vec::new(),
+                render_cache_streaming_len: 0,
             },
         }
     }
@@ -325,9 +331,16 @@ pub async fn run(mut app: App) -> Result<Vec<ChatMessage>> {
 
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec<ChatMessage>> {
     loop {
-        terminal.draw(|f| render(f, app))?;
         if app.quit {
             break;
+        }
+        // Render after state changes; skip on idle spinner tick.
+        let needs_render = app.mode != Mode::Streaming
+            || app.live.streaming_buf.len() != app.view.render_cache_streaming_len
+            || app.live.pending_tool.is_some();
+        if needs_render || app.mode != Mode::Streaming {
+            terminal.draw(|f| render(f, app))?;
+            app.view.render_cache_streaming_len = app.live.streaming_buf.len();
         }
         tokio::select! {
             Some(ev) = app.key_rx.recv() => {
