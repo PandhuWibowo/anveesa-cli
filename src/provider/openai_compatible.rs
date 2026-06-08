@@ -196,12 +196,17 @@ pub async fn ask(
 
         messages.push(assistant_tool_message(&state));
 
-        let all_readonly = state.tool_calls.len() > 1
-            && state.tool_calls.iter().all(|c| {
-                !tools::is_write_tool(&c.name) && c.name != "set_plan" && c.name != "complete_task"
-            });
+        // ── Concurrent tool execution (all tools, not just read-only) ───
+        // When policy is Allow (agent mode), run ALL tools concurrently.
+        // When policy is Prompt, collect write tools for batch approval.
+        // When policy is Deny, run read-only concurrently, skip write.
 
-        if all_readonly {
+        let _any_write_tool = state.tool_calls.iter().any(|c| {
+            tools::is_write_tool(&c.name) && c.name != "set_plan" && c.name != "complete_task"
+        });
+
+        if policy == ApprovalPolicy::Allow {
+            // Agent mode: run ALL tools concurrently
             let mut handles = Vec::with_capacity(state.tool_calls.len());
             for call in state.tool_calls.iter().cloned() {
                 let ev = events.clone();
@@ -217,6 +222,9 @@ pub async fn ask(
                         json!({"ok":false,"error":"task panicked"}).to_string(),
                     )
                 });
+                if tools::is_write_tool(&name) {
+                    any_write_tool_used = true;
+                }
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
@@ -225,6 +233,7 @@ pub async fn ask(
                 }));
             }
         } else {
+            // Sequential mode with batch approval for write tools
             for call in &state.tool_calls {
                 if tools::is_write_tool(&call.name) {
                     any_write_tool_used = true;
