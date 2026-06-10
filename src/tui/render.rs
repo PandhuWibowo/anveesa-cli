@@ -268,8 +268,13 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         let _ = focused; // used below in FileOp branch
         match msg {
             Msg::User { text } => {
-                let h = content_hash(&format!("user:{}:{}", msg_idx, text));
-                if let Some((_ch, clines)) = cache.get(msg_idx).cloned().and_then(|o| o.filter(|(x, _)| *x == h)) {
+                // Width is part of the key: a resize must invalidate old wrapping.
+                let h = content_hash(&format!("user:{}:{}:{}", msg_idx, width, text));
+                if let Some((_ch, clines)) = cache
+                    .get(msg_idx)
+                    .cloned()
+                    .and_then(|o| o.filter(|(x, _)| *x == h))
+                {
                     lines.extend(clines);
                 } else {
                     let mut ml: Vec<Line<'static>> = vec![user_header()];
@@ -282,8 +287,12 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
             }
             Msg::Assistant { text } => {
-                let h = content_hash(&format!("assistant:{}:{}", msg_idx, text));
-                if let Some((_ch, clines)) = cache.get(msg_idx).cloned().and_then(|o| o.filter(|(x, _)| *x == h)) {
+                let h = content_hash(&format!("assistant:{}:{}:{}", msg_idx, width, text));
+                if let Some((_ch, clines)) = cache
+                    .get(msg_idx)
+                    .cloned()
+                    .and_then(|o| o.filter(|(x, _)| *x == h))
+                {
                     lines.extend(clines);
                 } else {
                     let mut ml: Vec<Line<'static>> = vec![assistant_header(&app.model)];
@@ -479,30 +488,29 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     app.view.render_cache = cache;
     app.view.msg_line_offsets = msg_offsets;
 
-    // Live pending tool (running, not yet committed) — animated with elapsed time
-    if let Some(tool) = &app.live.pending_tool {
+    // Live pending tools (running, not yet committed) — one animated line each,
+    // since agent mode runs several tools concurrently.
+    if !app.live.pending_tools.is_empty() {
         let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let dot = dots[app.spinner_frame % dots.len()];
-        let elapsed = app
-            .live
-            .tool_started_at
-            .map(|t| t.elapsed().as_secs_f32())
-            .unwrap_or(0.0);
-        let elapsed_str = if elapsed < 0.5 {
-            String::new()
-        } else {
-            format!(" ({:.1}s)", elapsed)
-        };
-        lines.push(Line::from(vec![Span::styled(
-            format!("  {dot} {}{}", tool.summary, elapsed_str),
-            Style::default().fg(Color::Rgb(180, 140, 60)),
-        )]));
+        for tool in &app.live.pending_tools {
+            let elapsed = tool.started_at.elapsed().as_secs_f32();
+            let elapsed_str = if elapsed < 0.5 {
+                String::new()
+            } else {
+                format!(" ({:.1}s)", elapsed)
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {dot} {}{}", tool.summary, elapsed_str),
+                Style::default().fg(Color::Rgb(180, 140, 60)),
+            )]));
+        }
         lines.push(Line::from(""));
     }
 
     // In-progress streaming — assistant message being built token by token
     if !app.live.streaming_buf.is_empty()
-        || (app.mode == Mode::Streaming && app.live.pending_tool.is_none())
+        || (app.mode == Mode::Streaming && app.live.pending_tools.is_empty())
     {
         lines.push(assistant_header(&app.model));
         if !app.live.streaming_buf.is_empty() {
@@ -553,10 +561,18 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     app.view.scroll = scroll;
 
-    // "↓ unread" badge overlay when scrolled away
-    let mut widget_lines = lines;
-    if !app.view.auto_scroll && app.live.unread_count > 0 {
+    // Render only the visible slice — Paragraph::scroll is u16 and wraps past
+    // 65535 lines, and slicing keeps the per-frame cost O(viewport) instead of
+    // O(history). Lines are already pre-wrapped to width, so slicing is exact.
+    let mut widget_lines: Vec<Line<'static>> =
+        lines.into_iter().skip(scroll).take(visible).collect();
+
+    // "↓ unread" badge on the bottom viewport row when scrolled away
+    if !app.view.auto_scroll && app.live.unread_count > 0 && visible > 0 {
         let badge = format!(" ↓ {} new ", app.live.unread_count);
+        if widget_lines.len() >= visible {
+            widget_lines.truncate(visible - 1);
+        }
         widget_lines.push(Line::from(Span::styled(
             badge,
             Style::default()
@@ -566,10 +582,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
         )));
     }
 
-    frame.render_widget(
-        Paragraph::new(widget_lines).scroll((scroll as u16, 0)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(widget_lines), area);
 }
 
 fn user_header() -> Line<'static> {

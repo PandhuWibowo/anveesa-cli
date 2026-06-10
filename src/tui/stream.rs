@@ -95,7 +95,16 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
                 StreamEvent::Thinking(t) => TuiEvent::Thinking(t),
                 StreamEvent::Status { message } => TuiEvent::Status(message),
                 StreamEvent::ToolCall { summary } => TuiEvent::ToolCall(summary),
-                StreamEvent::ToolResult { summary, ok, .. } => TuiEvent::ToolDone { summary, ok },
+                StreamEvent::ToolResult {
+                    summary,
+                    ok,
+                    elapsed_ms,
+                    ..
+                } => TuiEvent::ToolDone {
+                    summary,
+                    ok,
+                    elapsed_ms,
+                },
                 StreamEvent::FileOp {
                     verb,
                     path,
@@ -193,23 +202,39 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
         }
         TuiEvent::ToolCall(summary) => {
             flush_streaming_buf(app);
-            commit_pending_tool(app, true);
-            app.live.pending_tool = Some(PendingTool {
+            app.live.pending_tools.push(PendingTool {
                 summary: summary.clone(),
+                started_at: Instant::now(),
             });
-            app.live.tool_started_at = Some(Instant::now());
             app.live.tool_status = summary;
         }
-        TuiEvent::ToolDone { summary, ok } => {
-            let elapsed_ms = app
-                .live
-                .tool_started_at
-                .take()
-                .map(|t| t.elapsed().as_millis());
+        TuiEvent::ToolDone {
+            summary,
+            ok,
+            elapsed_ms,
+        } => {
             record_seen_path(&mut app.conv.seen_paths, &summary);
-            app.live.pending_tool = Some(PendingTool { summary });
-            commit_pending_tool_timed(app, ok, elapsed_ms);
-            app.live.tool_status = "Thinking".to_string();
+            // Concurrent tools finish out of order — remove the matching
+            // pending entry (by summary), not whichever started last.
+            if let Some(i) = app
+                .live
+                .pending_tools
+                .iter()
+                .position(|t| t.summary == summary)
+            {
+                app.live.pending_tools.remove(i);
+            }
+            app.view.messages.push(Msg::Tool {
+                done: true,
+                ok,
+                text: summary,
+                elapsed_ms: Some(elapsed_ms),
+            });
+            app.live.tool_status = match app.live.pending_tools.len() {
+                0 => "Thinking".to_string(),
+                1 => app.live.pending_tools[0].summary.clone(),
+                n => format!("{n} tools running"),
+            };
         }
         TuiEvent::FileOp {
             verb,
@@ -219,7 +244,6 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             diff,
         } => {
             flush_streaming_buf(app);
-            commit_pending_tool(app, true);
             let old_content = std::fs::read_to_string(&path).ok();
             if app.conv.undo_stack.len() >= 20 {
                 app.conv.undo_stack.remove(0);
@@ -241,7 +265,6 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             reply,
         } => {
             flush_streaming_buf(app);
-            commit_pending_tool(app, true);
             app.confirm = Some(PendingConfirm {
                 summary,
                 diff,
@@ -285,9 +308,10 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
         }
         TuiEvent::Error(msg) => {
             flush_streaming_buf(app);
+            commit_all_pending_tools(app, false);
             app.view.messages.push(Msg::Error(msg));
             app.mode = Mode::Input;
-            app.view.auto_scroll = true;   // Reset for next turn.
+            app.view.auto_scroll = true; // Reset for next turn.
             app.view.scroll = usize::MAX;
             app.live.tool_status.clear();
         }
@@ -349,28 +373,21 @@ pub(super) fn flush_streaming_buf(app: &mut App) {
     }
 }
 
-pub(super) fn commit_pending_tool(app: &mut App, ok: bool) {
-    let elapsed = app
-        .live
-        .tool_started_at
-        .take()
-        .map(|t| t.elapsed().as_millis());
-    commit_pending_tool_timed(app, ok, elapsed);
-}
-
-pub(super) fn commit_pending_tool_timed(app: &mut App, ok: bool, elapsed_ms: Option<u128>) {
-    if let Some(tool) = app.live.pending_tool.take() {
+/// Commit any tools still marked pending (e.g. the stream ended or errored
+/// before their ToolDone arrived) so no spinner is left behind.
+pub(super) fn commit_all_pending_tools(app: &mut App, ok: bool) {
+    for tool in app.live.pending_tools.drain(..) {
         app.view.messages.push(Msg::Tool {
             done: true,
             ok,
             text: tool.summary,
-            elapsed_ms,
+            elapsed_ms: Some(tool.started_at.elapsed().as_millis()),
         });
     }
 }
 
 pub(super) fn finish_turn(app: &mut App) {
-    commit_pending_tool(app, true);
+    commit_all_pending_tools(app, true);
     if !app.live.thinking_buf.is_empty() {
         let text = std::mem::take(&mut app.live.thinking_buf);
         app.view.messages.push(Msg::Thinking {
@@ -403,11 +420,10 @@ pub(super) fn finish_turn(app: &mut App) {
         super::render::send_desktop_notification("anveesa", "Task complete");
     }
     app.mode = Mode::Input;
-    app.view.auto_scroll = true;   // Next turn should auto-scroll by default.
-    app.view.scroll = usize::MAX;  // Reset scroll so render.rs picks the bottom.
+    app.view.auto_scroll = true; // Next turn should auto-scroll by default.
+    app.view.scroll = usize::MAX; // Reset scroll so render.rs picks the bottom.
     app.live.tool_status.clear();
     app.live.streaming_started_at = None;
-    app.live.tool_started_at = None;
     if !app.conv.history.is_empty() {
         app.view.messages.push(Msg::Separator);
     }

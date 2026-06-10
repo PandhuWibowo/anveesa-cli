@@ -42,6 +42,7 @@ pub enum TuiEvent {
     ToolDone {
         summary: String,
         ok: bool,
+        elapsed_ms: u128,
     },
     FileOp {
         verb: String,
@@ -100,6 +101,7 @@ enum Msg {
 #[derive(Debug)]
 struct PendingTool {
     summary: String,
+    started_at: Instant,
 }
 
 #[derive(Debug)]
@@ -133,13 +135,13 @@ struct InputState {
 struct StreamState {
     streaming_buf: String,
     accumulated_response: String,
-    pending_tool: Option<PendingTool>,
+    // Tools currently executing — several can run concurrently in agent mode.
+    pending_tools: Vec<PendingTool>,
     tool_status: String,
     plan_tasks: Vec<String>,
     plan_done: Vec<bool>,
     pending_prompt: String,
     streaming_started_at: Option<Instant>,
-    tool_started_at: Option<Instant>,
     unread_count: usize,
     thinking_buf: String,
 }
@@ -168,8 +170,8 @@ struct ViewState {
     render_cache: Vec<Option<(u64, Vec<ratatui::text::Line<'static>>)>>,
     /// Length of streaming_buf last time we rendered (for skip-diff).
     render_cache_streaming_len: usize,
-    /// Last time we rendered during a tool execution (for throttling).
-    last_tool_render: Option<std::time::Instant>,
+    /// Last time we drew a frame (for render throttling during streaming).
+    last_render: Option<std::time::Instant>,
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -280,13 +282,12 @@ impl App {
             live: StreamState {
                 streaming_buf: String::new(),
                 accumulated_response: String::new(),
-                pending_tool: None,
+                pending_tools: Vec::new(),
                 tool_status: String::new(),
                 plan_tasks: vec![],
                 plan_done: vec![],
                 pending_prompt: String::new(),
                 streaming_started_at: None,
-                tool_started_at: None,
                 unread_count: 0,
                 thinking_buf: String::new(),
             },
@@ -313,7 +314,7 @@ impl App {
                 mouse_capture: true,
                 render_cache: Vec::new(),
                 render_cache_streaming_len: 0,
-                last_tool_render: None,
+                last_render: None,
             },
         }
     }
@@ -337,27 +338,20 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec
         if app.quit {
             break;
         }
-        // Render after state changes; throttle during tool execution to avoid freeze.
-        let pending = app.live.pending_tool.is_some();
+        // Throttle drawing during streaming (~20 fps cap) but NEVER skip event
+        // processing — a skipped frame is repainted on the next 80 ms tick,
+        // while a skipped event would back up the channel and freeze the UI.
         let needs_render = app.mode != Mode::Streaming
             || app.live.streaming_buf.len() != app.view.render_cache_streaming_len
-            || pending;
-        if needs_render {
-            // If a tool is running and no new event arrived, render at ~2 Hz (500 ms)
-            // instead of every 80 ms to keep the UI responsive.
-        if let Some(last) = app.view.last_tool_render
-            && pending
-            && std::time::Instant::now().duration_since(last) < Duration::from_millis(500)
-        {
-            // Throttle — only advance spinner, skip full re-render.
-            app.spinner_frame = app.spinner_frame.wrapping_add(1);
-            tokio::time::sleep(Duration::from_millis(80)).await;
-            continue;
-        }
-        if pending {
-            app.view.last_tool_render = Some(std::time::Instant::now());
-        }
+            || !app.live.pending_tools.is_empty();
+        let throttled = app.mode == Mode::Streaming
+            && app
+                .view
+                .last_render
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(50));
+        if needs_render && !throttled {
             terminal.draw(|f| render(f, app))?;
+            app.view.last_render = Some(std::time::Instant::now());
             app.view.render_cache_streaming_len = app.live.streaming_buf.len();
         }
         tokio::select! {
@@ -366,6 +360,18 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec
             }
             Some(tui_ev) = app.stream_rx.recv() => {
                 handle_stream_event(app, tui_ev).await;
+                // Drain any burst of stream events (concurrent tools, fast
+                // tokens) before the next draw so rendering can't fall behind.
+                let mut drained = 0;
+                while drained < 256 {
+                    match app.stream_rx.try_recv() {
+                        Ok(ev) => {
+                            handle_stream_event(app, ev).await;
+                            drained += 1;
+                        }
+                        Err(_) => break,
+                    }
+                }
             }
             _ = tokio::time::sleep(Duration::from_millis(80)) => {
                 if app.mode == Mode::Streaming {
