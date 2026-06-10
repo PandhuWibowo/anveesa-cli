@@ -201,8 +201,16 @@ pub fn describe_call(name: &str, arguments: &str) -> String {
         "create_dir" => format!("create directory {}", field("path")),
         "write_file" => format!("write file {}", field("path")),
         "edit_file" => format!("edit file {}", field("path")),
-        "glob" => format!("glob `{}` under {}", field("pattern"), field("path").if_empty(".")),
-        "grep" => format!("grep `{}` in {}", field("pattern"), field("path").if_empty(".")),
+        "glob" => format!(
+            "glob `{}` under {}",
+            field("pattern"),
+            field("path").if_empty(".")
+        ),
+        "grep" => format!(
+            "grep `{}` in {}",
+            field("pattern"),
+            field("path").if_empty(".")
+        ),
         "patch" => format!("patch {}", field("file_path")),
         "run_command" => format!("run command `{}`", field("command")),
         _ => format!("{name} {}", truncate(arguments, 80)),
@@ -2656,7 +2664,10 @@ async fn glob_tool(arguments: &str) -> Result<Value> {
     .map(|iter| {
         iter.filter_map(|e| {
             let p = e.ok()?;
-            Some(p.strip_prefix(&root).map_or(p.display().to_string(), |s| s.display().to_string()))
+            Some(
+                p.strip_prefix(&root)
+                    .map_or(p.display().to_string(), |s| s.display().to_string()),
+            )
         })
         .collect()
     })
@@ -2664,10 +2675,7 @@ async fn glob_tool(arguments: &str) -> Result<Value> {
 
     let count = entries.len();
     let mut truncated = false;
-    let listed: Vec<String> = entries
-        .into_iter()
-        .take(MAX_DIR_ENTRIES)
-        .collect();
+    let listed: Vec<String> = entries.into_iter().take(MAX_DIR_ENTRIES).collect();
     if count > MAX_DIR_ENTRIES {
         truncated = true;
     }
@@ -2723,7 +2731,10 @@ async fn grep_tool(arguments: &str) -> Result<Value> {
             if path.is_dir() {
                 search_dir(&path, re, include_pat, ctx, results, count)?;
             } else if path.is_file() {
-                let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default();
                 if let Some(pat) = include_pat
                     && !glob::Pattern::new(pat)
                         .map(|p| p.matches(&name))
@@ -2768,7 +2779,14 @@ async fn grep_tool(arguments: &str) -> Result<Value> {
     }
 
     if root.is_dir() {
-        search_dir(&root, &re, include_pat, ctx_lines, &mut results, &mut total_matches)?;
+        search_dir(
+            &root,
+            &re,
+            include_pat,
+            ctx_lines,
+            &mut results,
+            &mut total_matches,
+        )?;
     } else {
         let contents = fs::read_to_string(&root)?;
         let lines: Vec<&str> = contents.lines().collect();
@@ -2826,8 +2844,7 @@ async fn patch_file_tool(arguments: &str) -> Result<Value> {
     let path = resolve_path(args.file_path.trim())?;
 
     let content = if path.exists() {
-        fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?
     } else {
         bail!("file not found: {}", path.display());
     };
@@ -2865,7 +2882,11 @@ async fn patch_file_tool(arguments: &str) -> Result<Value> {
             }
             if !found {
                 // Couldn't find the line to remove, keep as-is
-                result.push(lines.get(current_line).map_or("".to_string(), |s| s.to_string()));
+                result.push(
+                    lines
+                        .get(current_line)
+                        .map_or("".to_string(), |s| s.to_string()),
+                );
             }
         } else if let Some(new_line) = patch_line.strip_prefix('+') {
             result.push(new_line.to_string());

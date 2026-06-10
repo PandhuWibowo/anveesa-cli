@@ -526,20 +526,24 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                     let _ = fs::create_dir_all(&notes_dir);
                     let note_path = notes_dir.join(format!("{key}.md"));
                     match fs::write(&note_path, format!("# {}\n\n{}\n", key, value)) {
-                        Ok(()) => app.view.messages.push(Msg::System(format!(
-                            "Note saved: {key}"
-                        ))),
-                        Err(e) => app.view.messages.push(Msg::Error(format!(
-                            "Cannot save note: {e}"
-                        ))),
+                        Ok(()) => app
+                            .view
+                            .messages
+                            .push(Msg::System(format!("Note saved: {key}"))),
+                        Err(e) => app
+                            .view
+                            .messages
+                            .push(Msg::Error(format!("Cannot save note: {e}"))),
                     }
                 } else {
-                    app.view.messages.push(Msg::Error("Cannot locate config directory.".into()));
+                    app.view
+                        .messages
+                        .push(Msg::Error("Cannot locate config directory.".into()));
                 }
             } else {
-                app.view.messages.push(Msg::System(
-                    "Usage: /note set <key> <value>".into(),
-                ));
+                app.view
+                    .messages
+                    .push(Msg::System("Usage: /note set <key> <value>".into()));
             }
             app.kbd.input.clear();
             app.kbd.input_cursor = 0;
@@ -549,26 +553,31 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
         s if s.starts_with("/note get ") => {
             let key = s.strip_prefix("/note get ").unwrap().trim();
             if let Ok(path) = crate::config::config_path() {
-                let note_path = path.parent().unwrap().join("notes").join(format!("{key}.md"));
+                let note_path = path
+                    .parent()
+                    .unwrap()
+                    .join("notes")
+                    .join(format!("{key}.md"));
                 match fs::read_to_string(&note_path) {
                     Ok(content) => {
                         let capped: String = content.chars().take(8_000).collect();
-                        app.conv
-                            .history
-                            .push(ChatMessage::user(format!(
-                                "[Context note ({key}):\n\n{capped}]"
-                            )));
+                        app.conv.history.push(ChatMessage::user(format!(
+                            "[Context note ({key}):\n\n{capped}]"
+                        )));
                         app.view.messages.push(Msg::System(format!(
                             "Loaded note: {key} ({})",
                             capped.lines().count()
                         )));
                     }
-                    Err(_) => app.view.messages.push(Msg::Error(format!(
-                        "Note not found: {key}"
-                    ))),
+                    Err(_) => app
+                        .view
+                        .messages
+                        .push(Msg::Error(format!("Note not found: {key}"))),
                 }
             } else {
-                app.view.messages.push(Msg::Error("Cannot locate config directory.".into()));
+                app.view
+                    .messages
+                    .push(Msg::Error("Cannot locate config directory.".into()));
             }
             app.kbd.input.clear();
             app.kbd.input_cursor = 0;
@@ -592,7 +601,9 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                         })
                         .collect();
                     if keys.is_empty() {
-                        app.view.messages.push(Msg::System("No saved notes.".into()));
+                        app.view
+                            .messages
+                            .push(Msg::System("No saved notes.".into()));
                     } else {
                         app.view.messages.push(Msg::System(format!(
                             "Saved notes ({}) — use /note get <key> to load: {}",
@@ -601,10 +612,14 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                         )));
                     }
                 } else {
-                    app.view.messages.push(Msg::System("No saved notes yet.".into()));
+                    app.view
+                        .messages
+                        .push(Msg::System("No saved notes yet.".into()));
                 }
             } else {
-                app.view.messages.push(Msg::Error("Cannot locate config directory.".into()));
+                app.view
+                    .messages
+                    .push(Msg::Error("Cannot locate config directory.".into()));
             }
             app.kbd.input.clear();
             app.kbd.input_cursor = 0;
@@ -614,17 +629,25 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
         s if s.starts_with("/note delete ") => {
             let key = s.strip_prefix("/note delete ").unwrap().trim();
             if let Ok(path) = crate::config::config_path() {
-                let note_path = path.parent().unwrap().join("notes").join(format!("{key}.md"));
+                let note_path = path
+                    .parent()
+                    .unwrap()
+                    .join("notes")
+                    .join(format!("{key}.md"));
                 match fs::remove_file(&note_path) {
-                    Ok(()) => app.view.messages.push(Msg::System(format!(
-                        "Deleted note: {key}"
-                    ))),
-                    Err(_) => app.view.messages.push(Msg::Error(format!(
-                        "Note not found: {key}"
-                    ))),
+                    Ok(()) => app
+                        .view
+                        .messages
+                        .push(Msg::System(format!("Deleted note: {key}"))),
+                    Err(_) => app
+                        .view
+                        .messages
+                        .push(Msg::Error(format!("Note not found: {key}"))),
                 }
             } else {
-                app.view.messages.push(Msg::Error("Cannot locate config directory.".into()));
+                app.view
+                    .messages
+                    .push(Msg::Error("Cannot locate config directory.".into()));
             }
             app.kbd.input.clear();
             app.kbd.input_cursor = 0;
@@ -638,15 +661,14 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                 "on" => {
                     app.policy = crate::provider::ApprovalPolicy::Allow;
                     app.view.messages.push(Msg::System(
-                        "Agent mode ON: tools will auto-approve. Use /agent off to disable."
-                            .into(),
+                        "Agent mode ON: tools will auto-approve. Use /agent off to disable.".into(),
                     ));
                 }
                 "off" => {
                     app.policy = crate::provider::ApprovalPolicy::Prompt;
-                    app.view
-                        .messages
-                        .push(Msg::System("Agent mode OFF: will ask before write/run tools.".into()));
+                    app.view.messages.push(Msg::System(
+                        "Agent mode OFF: will ask before write/run tools.".into(),
+                    ));
                 }
                 "" => {
                     let status = match app.policy {
@@ -654,12 +676,14 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                         crate::provider::ApprovalPolicy::Prompt => "OFF (ask before tools)",
                         crate::provider::ApprovalPolicy::Deny => "DENIED (no tools)",
                     };
-                    app.view.messages.push(Msg::System(format!("Agent mode: {status}")));
+                    app.view
+                        .messages
+                        .push(Msg::System(format!("Agent mode: {status}")));
                 }
                 _ => {
-                    app.view.messages.push(Msg::System(
-                        "Usage: /agent [on|off|status]".into(),
-                    ));
+                    app.view
+                        .messages
+                        .push(Msg::System("Usage: /agent [on|off|status]".into()));
                 }
             }
             app.kbd.input.clear();
@@ -672,12 +696,26 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
             let branch = git(&["branch", "--show-current"]).unwrap_or_default();
             let remote = git(&["config", "--get", "branch", &branch, "remote"])
                 .unwrap_or_else(|| "origin".to_string());
-            let upstream = git(&["rev-parse", "--abbrev-ref", format!("{remote}/{}", branch).as_str()])
-                .unwrap_or_else(|| "no upstream".to_string());
-            let ahead = git(&["rev-list", "--count", "--right-only", format!("{branch}...{}", upstream).as_str()])
-                .unwrap_or_default();
-            let behind = git(&["rev-list", "--count", "--left-only", format!("{branch}...{}", upstream).as_str()])
-                .unwrap_or_default();
+            let upstream = git(&[
+                "rev-parse",
+                "--abbrev-ref",
+                format!("{remote}/{}", branch).as_str(),
+            ])
+            .unwrap_or_else(|| "no upstream".to_string());
+            let ahead = git(&[
+                "rev-list",
+                "--count",
+                "--right-only",
+                format!("{branch}...{}", upstream).as_str(),
+            ])
+            .unwrap_or_default();
+            let behind = git(&[
+                "rev-list",
+                "--count",
+                "--left-only",
+                format!("{branch}...{}", upstream).as_str(),
+            ])
+            .unwrap_or_default();
             let status = format!(
                 "Branch: {} (remote: {remote}/{upstream})  ahead: {}  behind: {}",
                 branch, ahead, behind
@@ -699,8 +737,13 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                 "Tokens: {}↓ {}↑ {} total\n\
                  Estimated cost: ~${:.4} (${:.2}/M prompt, ${:.2}/M completion)\n\
                  Session cost: ${:.4}",
-                u.prompt_tokens, u.completion_tokens, u.total_tokens,
-                total_est, 5.0, 15.0, est.max(total_est),
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.total_tokens,
+                total_est,
+                5.0,
+                15.0,
+                est.max(total_est),
             );
             app.view.messages.push(Msg::System(cost_line));
             app.kbd.input.clear();
@@ -712,13 +755,13 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
         s if s.starts_with("/plan ") => {
             let prompt = s.strip_prefix("/plan ").unwrap().trim().to_string();
             if prompt.is_empty() {
-                app.view.messages.push(Msg::System(
-                    "Usage: /plan <what to build>".into(),
-                ));
+                app.view
+                    .messages
+                    .push(Msg::System("Usage: /plan <what to build>".into()));
             } else {
-                app.view.messages.push(Msg::System(format!(
-                    "Generating plan for: {prompt}...",
-                )));
+                app.view
+                    .messages
+                    .push(Msg::System(format!("Generating plan for: {prompt}...",)));
                 let tx = app.stream_tx.clone();
                 let config = app.config.clone();
                 let provider_name = app.provider.clone();
@@ -728,37 +771,61 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                         tokio::sync::mpsc::unbounded_channel::<crate::provider::StreamEvent>();
                     let request = PromptRequest {
                         prompt: format!(
-                            "Create a numbered execution plan for: {prompt}\n\nRules:\n1. Number each step 1, 2, 3\n2. Each step is one actionable task\n3. Include file paths when relevant\n4. Prefix each step with [read] [write] or [run]\n5. Output ONLY the numbered list, no preamble\nProject context:\n{}" ,
+                            "Create a numbered execution plan for: {prompt}\n\nRules:\n1. Number each step 1, 2, 3\n2. Each step is one actionable task\n3. Include file paths when relevant\n4. Prefix each step with [read] [write] or [run]\n5. Output ONLY the numbered list, no preamble\nProject context:\n{}",
                             ctx.as_deref().unwrap_or("")
                         ),
                         model: None,
-                        system: Some("You are a precise task planner. Output only numbered steps.".into()),
+                        system: Some(
+                            "You are a precise task planner. Output only numbered steps.".into(),
+                        ),
                         workspace_context: None,
                         history: vec![],
                         images: vec![],
                         mcp: None,
                     };
                     if let Ok(result) = crate::provider::ask(
-                        &config, &provider_name, request,
-                        ApprovalPolicy::Deny, &dummy_tx,
-                    ).await {
-                        let steps: Vec<String> = result.text.lines()
+                        &config,
+                        &provider_name,
+                        request,
+                        ApprovalPolicy::Deny,
+                        &dummy_tx,
+                    )
+                    .await
+                    {
+                        let steps: Vec<String> = result
+                            .text
+                            .lines()
                             .filter_map(|l| {
                                 let t = l.trim();
                                 if t.starts_with(|c: char| c.is_ascii_digit()) && t.contains('.') {
-                                    Some(t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.').trim().to_string())
-                                } else { None }
+                                    Some(
+                                        t.trim_start_matches(|c: char| {
+                                            c.is_ascii_digit() || c == '.'
+                                        })
+                                        .trim()
+                                        .to_string(),
+                                    )
+                                } else {
+                                    None
+                                }
                             })
                             .collect();
                         if steps.is_empty() {
-                            let _ = tx.send(TuiEvent::SystemMsg(format!("Plan:\n{}", result.text.trim())));
+                            let _ = tx.send(TuiEvent::SystemMsg(format!(
+                                "Plan:\n{}",
+                                result.text.trim()
+                            )));
                         } else {
                             let _ = tx.send(TuiEvent::PlanSet(steps.clone()));
-                            let numbered = steps.iter()
+                            let numbered = steps
+                                .iter()
                                 .map(|s| format!("  [ ] {}", s))
-                                .collect::<Vec<_>>().join("\n");
+                                .collect::<Vec<_>>()
+                                .join("\n");
                             let _ = tx.send(TuiEvent::SystemMsg(format!(
-                                "Plan created ({} steps):\n\n{}", steps.len(), numbered
+                                "Plan created ({} steps):\n\n{}",
+                                steps.len(),
+                                numbered
                             )));
                         }
                     }
@@ -771,7 +838,9 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
 
         // ── /brain — AI-powered project knowledge dump ───────────────────────────
         "/brain" => {
-            app.view.messages.push(Msg::System("Analyzing project context…".into()));
+            app.view
+                .messages
+                .push(Msg::System("Analyzing project context…".into()));
             let tx = app.stream_tx.clone();
             let config = app.config.clone();
             let provider_name = app.provider.clone();
@@ -792,11 +861,17 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                     mcp: None,
                 };
                 if let Ok(result) = crate::provider::ask(
-                    &config, &provider_name, request,
-                    ApprovalPolicy::Deny, &dummy_tx,
-                ).await {
+                    &config,
+                    &provider_name,
+                    request,
+                    ApprovalPolicy::Deny,
+                    &dummy_tx,
+                )
+                .await
+                {
                     let _ = tx.send(TuiEvent::SystemMsg(format!(
-                        "Project Brain:\n\n{}", result.text.trim()
+                        "Project Brain:\n\n{}",
+                        result.text.trim()
                     )));
                 }
             });
@@ -807,7 +882,9 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
 
         // ── /arch — ASCII codebase architecture map ──────────────────────────────
         "/arch" => {
-            app.view.messages.push(Msg::System("Generating architecture map…".into()));
+            app.view
+                .messages
+                .push(Msg::System("Generating architecture map…".into()));
             let tx = app.stream_tx.clone();
             let config = app.config.clone();
             let provider_name = app.provider.clone();
@@ -821,18 +898,26 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                         ctx.as_deref().unwrap_or("No context.")
                     ),
                     model: None,
-                    system: Some("Create ASCII architecture diagrams with box-drawing chars.".into()),
+                    system: Some(
+                        "Create ASCII architecture diagrams with box-drawing chars.".into(),
+                    ),
                     workspace_context: None,
                     history: vec![],
                     images: vec![],
                     mcp: None,
                 };
                 if let Ok(result) = crate::provider::ask(
-                    &config, &provider_name, request,
-                    ApprovalPolicy::Deny, &dummy_tx,
-                ).await {
+                    &config,
+                    &provider_name,
+                    request,
+                    ApprovalPolicy::Deny,
+                    &dummy_tx,
+                )
+                .await
+                {
                     let _ = tx.send(TuiEvent::SystemMsg(format!(
-                        "Architecture Map:\n\n```\n{}\n```", result.text.trim()
+                        "Architecture Map:\n\n```\n{}\n```",
+                        result.text.trim()
                     )));
                 }
             });
@@ -849,18 +934,29 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
             } else {
                 std::path::PathBuf::from(arg)
             };
-            let text = app.conv.history.iter().map(|m| {
-                let role = match m.role {
-                    crate::provider::ChatRole::User => "[You]",
-                    crate::provider::ChatRole::Assistant => "[AI]",
-                };
-                format!("{} {}", role, m.content)
-            }).collect::<Vec<_>>().join("\n\n");
+            let text = app
+                .conv
+                .history
+                .iter()
+                .map(|m| {
+                    let role = match m.role {
+                        crate::provider::ChatRole::User => "[You]",
+                        crate::provider::ChatRole::Assistant => "[AI]",
+                    };
+                    format!("{} {}", role, m.content)
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
             match std::fs::write(&path, &text) {
                 Ok(()) => app.view.messages.push(Msg::System(format!(
-                    "Exported plain text → {} ({} chars)", path.display(), text.len()
+                    "Exported plain text → {} ({} chars)",
+                    path.display(),
+                    text.len()
                 ))),
-                Err(e) => app.view.messages.push(Msg::Error(format!("export failed: {e:#}"))),
+                Err(e) => app
+                    .view
+                    .messages
+                    .push(Msg::Error(format!("export failed: {e:#}"))),
             }
             app.kbd.input.clear();
             app.kbd.input_cursor = 0;
@@ -874,7 +970,11 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
         // ── Custom slash commands from .anveesa/commands/*.md ───────────────────
         s if s.starts_with('/') => {
             // Extract command name
-            let cmd_name = s.split_whitespace().next().unwrap_or(s).trim_end_matches('/');
+            let cmd_name = s
+                .split_whitespace()
+                .next()
+                .unwrap_or(s)
+                .trim_end_matches('/');
             let cmd_arg = s.strip_prefix(cmd_name).map(|s| s.trim()).unwrap_or("");
 
             // Look for custom command definition
@@ -963,6 +1063,9 @@ fn load_custom_command(name: &str) -> Option<CustomCommand> {
     if action.is_empty() {
         None
     } else {
-        Some(CustomCommand { action, description })
+        Some(CustomCommand {
+            action,
+            description,
+        })
     }
 }
