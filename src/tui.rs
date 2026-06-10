@@ -156,7 +156,6 @@ struct StreamState {
     plan_done: Vec<bool>,
     pending_prompt: String,
     streaming_started_at: Option<Instant>,
-    unread_count: usize,
     thinking_buf: String,
     /// A background compaction summary is being generated.
     compact_in_flight: bool,
@@ -184,6 +183,9 @@ struct ViewState {
     search_idx: usize,
     search_scroll_saved: usize,
     mouse_capture: bool,
+    /// Height of the messages viewport at last render — scrolling up can't
+    /// disable auto-follow when the whole transcript already fits on screen.
+    viewport_height: usize,
     /// Cached formatted lines per message index: Option<(content_hash, lines)>. Indexed by msg index.
     render_cache: Vec<Option<(u64, Vec<ratatui::text::Line<'static>>)>>,
     /// Last time we drew a frame (for render throttling during streaming).
@@ -305,7 +307,6 @@ impl App {
                 plan_done: vec![],
                 pending_prompt: String::new(),
                 streaming_started_at: None,
-                unread_count: 0,
                 thinking_buf: String::new(),
                 compact_in_flight: false,
                 turn_abort: None,
@@ -331,6 +332,7 @@ impl App {
                 search_idx: 0,
                 search_scroll_saved: 0,
                 mouse_capture: true,
+                viewport_height: 0,
                 render_cache: Vec::new(),
                 last_render: None,
             },
@@ -448,7 +450,9 @@ async fn handle_event(app: &mut App, event: Event) -> Result<()> {
 
 fn handle_mouse(app: &mut App, kind: MouseEventKind) {
     match kind {
-        MouseEventKind::ScrollUp => {
+        // A stray scroll on a transcript that fits on screen must not turn
+        // off auto-follow — there is nothing to scroll to.
+        MouseEventKind::ScrollUp if app.view.total_lines > app.view.viewport_height => {
             app.view.auto_scroll = false;
             app.view.scroll = app.view.scroll.saturating_sub(3);
         }
@@ -456,7 +460,6 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind) {
             app.view.scroll = app.view.scroll.saturating_add(3);
             if app.view.scroll >= app.view.total_lines {
                 app.view.auto_scroll = true;
-                app.live.unread_count = 0;
             }
         }
         _ => {}
@@ -493,7 +496,7 @@ async fn handle_key(
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 stream::cancel_turn(app);
             }
-            KeyCode::PageUp => {
+            KeyCode::PageUp if app.view.total_lines > app.view.viewport_height => {
                 app.view.auto_scroll = false;
                 app.view.scroll = app.view.scroll.saturating_sub(10);
             }
@@ -502,14 +505,15 @@ async fn handle_key(
                 // Re-enable auto-scroll when reaching the bottom
                 if app.view.scroll >= app.view.total_lines.saturating_sub(10) {
                     app.view.auto_scroll = true;
-                    app.live.unread_count = 0;
                 }
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Char('j') | KeyCode::Down
+                if app.view.total_lines > app.view.viewport_height =>
+            {
                 app.view.auto_scroll = false;
                 app.view.scroll = app.view.scroll.saturating_add(1);
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Char('k') | KeyCode::Up if app.view.total_lines > app.view.viewport_height => {
                 app.view.auto_scroll = false;
                 app.view.scroll = app.view.scroll.saturating_sub(1);
             }
@@ -757,14 +761,11 @@ async fn handle_key(
         // j/k vim-style scroll when input is empty
         KeyCode::Char('j') if app.kbd.input.is_empty() => {
             app.view.scroll = app.view.scroll.saturating_add(3);
-            if app.view.scroll >= app.view.total_lines {
-                app.view.auto_scroll = true;
-                app.live.unread_count = 0;
-            } else {
-                app.view.auto_scroll = false;
-            }
+            app.view.auto_scroll = app.view.scroll >= app.view.total_lines;
         }
-        KeyCode::Char('k') if app.kbd.input.is_empty() => {
+        KeyCode::Char('k')
+            if app.kbd.input.is_empty() && app.view.total_lines > app.view.viewport_height =>
+        {
             app.view.auto_scroll = false;
             app.view.scroll = app.view.scroll.saturating_sub(3);
         }

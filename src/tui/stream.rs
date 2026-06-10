@@ -198,8 +198,6 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             app.live.streaming_buf.push_str(&text);
             if app.view.auto_scroll {
                 app.view.scroll = usize::MAX;
-            } else {
-                app.live.unread_count += 1;
             }
         }
         TuiEvent::Thinking(text) => {

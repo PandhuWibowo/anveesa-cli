@@ -343,6 +343,7 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let total = running + tail.len();
     app.view.total_lines = total;
+    app.view.viewport_height = visible;
     app.view.msg_line_offsets = msg_offsets;
 
     let scroll = if app.view.auto_scroll || app.view.scroll == usize::MAX {
@@ -385,9 +386,13 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
 
     app.view.render_cache = cache;
 
-    // "↓ unread" badge on the bottom viewport row when scrolled away
-    if !app.view.auto_scroll && app.live.unread_count > 0 && visible > 0 {
-        let badge = format!(" ↓ {} new ", app.live.unread_count);
+    // "↓ N lines" badge on the bottom viewport row when scrolled away.
+    // Computed from the actual line count below the viewport — a counter
+    // bumped per token both inflated wildly and showed when nothing was
+    // actually below the fold.
+    let below = total.saturating_sub(scroll + visible);
+    if !app.view.auto_scroll && below > 0 && visible > 0 {
+        let badge = format!(" ↓ {below} lines ");
         if widget_lines.len() >= visible {
             widget_lines.truncate(visible - 1);
         }
