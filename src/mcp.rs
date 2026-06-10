@@ -46,6 +46,10 @@ struct McpServer {
     stdin: Mutex<tokio::process::ChildStdin>,
     stdout: Mutex<BufReader<tokio::process::ChildStdout>>,
     next_id: Mutex<u64>,
+    /// Serializes whole request/response exchanges. Without it, concurrent
+    /// callers interleave on stdout and read (then drop) each other's
+    /// responses, leaving the other request to hang until timeout.
+    request_lock: Mutex<()>,
     _child: Child,
 }
 
@@ -69,6 +73,7 @@ impl McpServer {
             stdin: Mutex::new(stdin),
             stdout: Mutex::new(stdout),
             next_id: Mutex::new(1),
+            request_lock: Mutex::new(()),
             _child: child,
         };
 
@@ -99,6 +104,7 @@ impl McpServer {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let _guard = self.request_lock.lock().await;
         let id = {
             let mut n = self.next_id.lock().await;
             let v = *n;
