@@ -4,7 +4,7 @@
 
 A multi-provider terminal AI assistant written in Rust (edition 2024). Ships a full TUI, a browser web UI, and a one-shot CLI mode. Every AI provider that speaks the OpenAI chat/completions API works out of the box.
 
-**Version:** 0.7.6 | **Tests:** 684 passing (675 unit + 9 doc) | **Warnings:** 0
+**Version:** 0.7.7 | **Tests:** 684 passing (675 unit + 9 doc) | **Warnings:** 0
 
 ## Module map
 

@@ -1,6 +1,6 @@
 [package]
 name = "anveesa"
-version = "0.7.6"
+version = "0.7.7"
 edition = "2024"
 default-run = "anveesa"
 description = "Multi-provider terminal AI assistant — TUI, web UI, and one-shot mode backed by any OpenAI-compatible API"
