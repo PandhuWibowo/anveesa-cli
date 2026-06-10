@@ -116,6 +116,13 @@ pub async fn render_stream(
                             print_status("Applying action (all approved for this turn)", spinner);
                             status_message = "Applying action".to_string();
                         }
+                        ApprovalDecision::AlwaysAllow => {
+                            print_status(
+                                "Applying action (saved to .anveesa/settings.json)",
+                                spinner,
+                            );
+                            status_message = "Applying action".to_string();
+                        }
                         ApprovalDecision::Deny => {
                             print_status("Action declined", spinner);
                             status_message = "Continuing".to_string();
@@ -495,10 +502,10 @@ pub fn prompt_confirm_decision(is_tty: bool) -> ApprovalDecision {
     if is_tty {
         let _ = write!(
             err,
-            "\x1b[1;32m❯\x1b[0m Apply? \x1b[2m[y]es / [a]ll this turn / [N]o\x1b[0m  "
+            "\x1b[1;32m❯\x1b[0m Apply? \x1b[2m[y]es / [a]ll this turn / [s]ave always / [N]o\x1b[0m  "
         );
     } else {
-        let _ = write!(err, "Apply? [y]es/[a]ll this turn/[N]o  ");
+        let _ = write!(err, "Apply? [y]es/[a]ll this turn/[s]ave always/[N]o  ");
     }
     let _ = err.flush();
 
@@ -509,6 +516,7 @@ pub fn prompt_confirm_decision(is_tty: bool) -> ApprovalDecision {
     match answer.trim().to_lowercase().as_str() {
         "y" | "yes" => ApprovalDecision::AllowOnce,
         "a" | "all" => ApprovalDecision::AllowForTurn,
+        "s" | "save" | "always" => ApprovalDecision::AlwaysAllow,
         _ => ApprovalDecision::Deny,
     }
 }

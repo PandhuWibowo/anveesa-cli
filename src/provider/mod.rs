@@ -72,6 +72,9 @@ pub enum ApprovalDecision {
     Deny,
     AllowOnce,
     AllowForTurn,
+    /// Allow now AND persist a rule in .anveesa/settings.json so this kind
+    /// of action never prompts again in this project.
+    AlwaysAllow,
 }
 
 impl ApprovalPolicy {

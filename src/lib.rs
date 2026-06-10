@@ -3,6 +3,7 @@ pub mod config;
 pub mod display;
 pub mod image;
 pub mod mcp;
+pub mod permissions;
 pub mod prompt;
 pub mod provider;
 pub mod session;

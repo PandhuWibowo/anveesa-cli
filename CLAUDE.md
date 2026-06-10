@@ -4,7 +4,7 @@
 
 A multi-provider terminal AI assistant written in Rust (edition 2024). Ships a full TUI, a browser web UI, and a one-shot CLI mode. Every AI provider that speaks the OpenAI chat/completions API works out of the box.
 
-**Version:** 0.7.7 | **Tests:** 684 passing (675 unit + 9 doc) | **Warnings:** 0
+**Version:** 0.7.7 | **Tests:** 692 passing (683 unit + 9 doc) | **Warnings:** 0
 
 ## Module map
 
@@ -17,6 +17,7 @@ src/
   display.rs          — REPL (non-TUI) terminal output, render_stream, print_* helpers
   image.rs            — clipboard image read (macOS), load_image_file, parse_attach_command
   mcp.rs              — Model Context Protocol client (McpManager)
+  permissions.rs      — per-project persisted approval rules (.anveesa/settings.json)
   prompt.rs           — PromptBuffer, RawPromptMode, raw line-reader for the plain REPL
   session.rs          — InteractiveSession, save/load/purge, format_session_age
   tools.rs            — all 32 tool implementations + definitions() + approval
@@ -60,14 +61,14 @@ Top-level App keeps: `mode`, `confirm`, `provider`, `model`, `usage`, `config`, 
 - **cargo clippy --all-targets -- -D warnings** — CI runs this on Ubuntu (covers test code too). Test locally too.
 - **No new dependencies** without good reason — Cargo.toml is deliberately lean.
 - **Tests live in the same file** as the code they test (bottom `#[cfg(test)] mod tests`).
-- **684 tests** — `cargo test` must stay green.
+- **692 tests** — `cargo test` must stay green.
 
 ## Build & test
 
 ```bash
 cargo build          # dev build
 cargo build --release # production binary
-cargo test           # 684 tests
+cargo test           # 692 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -131,3 +132,7 @@ Users can create `~ ~/.anveesa/commands/*.md` files. Each file is auto-discovere
 `/add <file>`, `/diff`, `/commit [msg]`, `/memory <note>`, `/compact`, `/undo`, `/retry`, `/init`, `/copy`, `/export`, `/export text`, `/model`, `/provider`, `/status`, `/search`, `/clear`, `/help`, `/exit`, `/plan`
 
 Esc / Ctrl+C cancels a streaming response (partial output stays visible, not saved to history).
+
+## Permission persistence
+
+Approval prompts offer `[s] always (save)` — persists a rule to `.anveesa/settings.json` under `permissions.allow` so matching actions skip the prompt in this project. Rule format `"<tool>:<pattern>"`; trailing `*` = prefix match. run_command saves the program name (`run_command:cargo *`); file tools save the exact path. `/permissions` lists saved rules.

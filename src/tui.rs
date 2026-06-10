@@ -466,6 +466,7 @@ async fn handle_key(
             let decision = match code {
                 KeyCode::Char('y') | KeyCode::Enter => ApprovalDecision::AllowOnce,
                 KeyCode::Char('a') => ApprovalDecision::AllowForTurn,
+                KeyCode::Char('s') => ApprovalDecision::AlwaysAllow,
                 _ => ApprovalDecision::Deny,
             };
             let _ = confirm.reply.send(decision);

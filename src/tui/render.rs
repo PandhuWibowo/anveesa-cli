@@ -686,7 +686,9 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
                 )));
             }
             lines.push(Line::from(Span::styled(
-                format!(" ⚠  {summary}   [y] allow once   [a] allow all   [n] deny "),
+                format!(
+                    " ⚠  {summary}   [y] once  [a] all this turn  [s] always (save)  [n] deny "
+                ),
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Rgb(224, 108, 117)),

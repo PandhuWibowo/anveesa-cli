@@ -56,6 +56,7 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                  /undo         restore last file changed by AI\n\
                  /retry        re-send your last prompt\n\
                  /init         generate .anveesa.md for this repo\n\
+                 /permissions  list saved approval rules for this project\n\
                  /compact      summarize old turns to free context\n\
                  /copy         copy last response to clipboard\n\
                  /export [path] save conversation as markdown\n\
@@ -149,6 +150,30 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                             .push(Msg::Error(format!("Undo failed: {e}"))),
                     }
                 }
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+        "/permissions" => {
+            let root = std::env::current_dir().unwrap_or_default();
+            let rules = crate::permissions::load_rules(&root);
+            if rules.is_empty() {
+                app.view.messages.push(Msg::System(
+                    "No saved permissions. Press [s] on an approval prompt to save one.\n\
+                     Rules live in .anveesa/settings.json (\"<tool>:<pattern>\", trailing * = prefix)."
+                        .into(),
+                ));
+            } else {
+                let list = rules
+                    .iter()
+                    .map(|r| format!("  · {r}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                app.view.messages.push(Msg::System(format!(
+                    "Saved permissions ({}):\n{list}\nEdit .anveesa/settings.json to remove rules.",
+                    crate::permissions::settings_path(&root).display()
+                )));
             }
             app.kbd.input.clear();
             app.kbd.input_cursor = 0;

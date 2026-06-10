@@ -63,7 +63,7 @@ pub async fn ask(
     let mut usage_requested = true;
     let mut tool_rounds = 0usize;
     let max_tool_rounds = max_tool_rounds();
-    let mut approval_state = ToolApprovalState::default();
+    let mut approval_state = ToolApprovalState::for_project();
     let mut full_text = String::new();
     let mut last_usage: Option<Usage> = None;
     let mut tool_intent_reprompts = 0usize;
@@ -297,6 +297,45 @@ struct ToolApprovalState {
     allow_for_turn: bool,
     /// Tracks how many times each identical (name, arguments) pair has been called this turn.
     call_counts: std::collections::HashMap<(String, String), usize>,
+    /// Persisted allow rules from .anveesa/settings.json — actions matching
+    /// one of these skip the approval prompt.
+    project_rules: Vec<String>,
+    /// Where new "always allow" rules are saved (git root, else cwd).
+    project_root: Option<std::path::PathBuf>,
+}
+
+impl ToolApprovalState {
+    fn for_project() -> Self {
+        let root = git_root().or_else(|| std::env::current_dir().ok());
+        let project_rules = root
+            .as_deref()
+            .map(crate::permissions::load_rules)
+            .unwrap_or_default();
+        Self {
+            project_rules,
+            project_root: root,
+            ..Self::default()
+        }
+    }
+
+    /// Does a saved project rule allow this call without prompting?
+    fn rule_allows_call(&self, name: &str, arguments: &str) -> bool {
+        crate::permissions::primary_arg(name, arguments)
+            .map(|arg| crate::permissions::rule_allows(&self.project_rules, name, &arg))
+            .unwrap_or(false)
+    }
+
+    /// Persist (and remember in-memory) an "always allow" rule for this call.
+    fn save_always_rule(&mut self, name: &str, arguments: &str) {
+        let Some(arg) = crate::permissions::primary_arg(name, arguments) else {
+            return;
+        };
+        let rule = crate::permissions::derive_rule(name, &arg);
+        if let Some(root) = &self.project_root {
+            let _ = crate::permissions::save_rule(root, &rule);
+        }
+        self.project_rules.push(rule);
+    }
 }
 
 fn git_root() -> Option<std::path::PathBuf> {
@@ -602,12 +641,16 @@ async fn dispatch_tool(
     if tools::is_write_tool(&call.name)
         && policy == ApprovalPolicy::Prompt
         && !approval_state.allow_for_turn
+        && !approval_state.rule_allows_call(&call.name, &call.arguments)
     {
         let preview = build_confirm_preview(&call.name, &call.arguments, &file_op_snapshot);
         preview_was_shown = true;
         match request_approval_with_preview(preview, events).await {
             ApprovalDecision::AllowOnce => {}
             ApprovalDecision::AllowForTurn => approval_state.allow_for_turn = true,
+            ApprovalDecision::AlwaysAllow => {
+                approval_state.save_always_rule(&call.name, &call.arguments);
+            }
             ApprovalDecision::Deny => return denied_message("user declined this action"),
         }
         let _ = events.send(StreamEvent::Status {
