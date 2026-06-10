@@ -196,35 +196,51 @@ pub async fn ask(
 
         messages.push(assistant_tool_message(&state));
 
-        // ── Concurrent tool execution (all tools, not just read-only) ───
-        // When policy is Allow (agent mode), run ALL tools concurrently.
-        // When policy is Prompt, collect write tools for batch approval.
-        // When policy is Deny, run read-only concurrently, skip write.
-
-        let _any_write_tool = state.tool_calls.iter().any(|c| {
-            tools::is_write_tool(&c.name) && c.name != "set_plan" && c.name != "complete_task"
-        });
-
         if policy == ApprovalPolicy::Allow {
-            // Agent mode: run ALL tools concurrently
-            let mut handles = Vec::with_capacity(state.tool_calls.len());
-            for call in state.tool_calls.iter().cloned() {
-                let ev = events.clone();
-                let mcp_arc = request.mcp.clone();
-                handles.push(tokio::spawn(dispatch_read_only_tool(call, ev, mcp_arc)));
+            // Agent mode: run all tools concurrently. No interactive approval,
+            // but the per-call safety rails (anti-loop guard, path sandbox,
+            // dangerous-command patterns) still apply.
+            enum Slot {
+                Done(String, String, String),
+                Running(
+                    String,
+                    String,
+                    tokio::task::JoinHandle<(String, String, String)>,
+                ),
             }
-            for (i, handle) in handles.into_iter().enumerate() {
-                let (id, name, content) = handle.await.unwrap_or_else(|_| {
-                    let c = &state.tool_calls[i];
-                    (
-                        c.id.clone(),
-                        c.name.clone(),
-                        json!({"ok":false,"error":"task panicked"}).to_string(),
-                    )
-                });
-                if tools::is_write_tool(&name) {
+            let mut slots = Vec::with_capacity(state.tool_calls.len());
+            for call in state.tool_calls.iter().cloned() {
+                if let Some(content) = try_plan_tool(&call, events) {
+                    slots.push(Slot::Done(call.id, call.name, content));
+                    continue;
+                }
+                // The guard mutates shared per-turn state — check before spawning.
+                if let Some(refusal) = anti_loop_refusal(&mut approval_state, &call) {
+                    slots.push(Slot::Done(call.id, call.name, refusal));
+                    continue;
+                }
+                if tools::is_write_tool(&call.name) {
                     any_write_tool_used = true;
                 }
+                let ev = events.clone();
+                let mcp_arc = request.mcp.clone();
+                slots.push(Slot::Running(
+                    call.id.clone(),
+                    call.name.clone(),
+                    tokio::spawn(dispatch_tool_concurrent(call, ev, mcp_arc)),
+                ));
+            }
+            for slot in slots {
+                let (id, name, content) = match slot {
+                    Slot::Done(id, name, content) => (id, name, content),
+                    Slot::Running(id, name, handle) => handle.await.unwrap_or_else(move |_| {
+                        (
+                            id,
+                            name,
+                            json!({"ok":false,"error":"task panicked"}).to_string(),
+                        )
+                    }),
+                };
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
@@ -384,7 +400,68 @@ fn dangerous_command_check(arguments: &str) -> Option<String> {
     None
 }
 
-async fn dispatch_read_only_tool(
+/// Handle set_plan / complete_task — display-only tools that just emit events.
+/// Returns Some(result) when the call was one of them.
+fn try_plan_tool(call: &PartialToolCall, events: &UnboundedSender<StreamEvent>) -> Option<String> {
+    match call.name.as_str() {
+        "set_plan" => {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                let tasks = args["steps"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let _ = events.send(StreamEvent::PlanSet { tasks });
+            }
+            Some(json!({"ok": true}).to_string())
+        }
+        "complete_task" => {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                && let Some(index) = args["index"].as_u64()
+            {
+                let _ = events.send(StreamEvent::PlanTaskDone {
+                    index: index as usize,
+                });
+            }
+            Some(json!({"ok": true}).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Anti-loop guard: refuse if the model is calling the exact same (tool, args)
+/// repeatedly this turn. Returns Some(refusal) past the limit.
+fn anti_loop_refusal(
+    approval_state: &mut ToolApprovalState,
+    call: &PartialToolCall,
+) -> Option<String> {
+    let key = (call.name.clone(), call.arguments.clone());
+    let count = approval_state.call_counts.entry(key).or_insert(0);
+    *count += 1;
+    if *count > MAX_IDENTICAL_CALLS {
+        Some(
+            json!({
+                "ok": false,
+                "error": format!(
+                    "Refusing to run '{}' again: this identical call has already been made {} time(s) \
+                    this turn. Do NOT retry — stop and report the failure to the user.",
+                    call.name, *count - 1
+                )
+            })
+            .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Concurrent dispatch for agent mode (ApprovalPolicy::Allow). Skips the
+/// interactive approval flow but keeps the sandbox and dangerous-command
+/// rails, and still emits FileOp diff events for write tools.
+async fn dispatch_tool_concurrent(
     call: PartialToolCall,
     events: UnboundedSender<StreamEvent>,
     mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
@@ -412,10 +489,30 @@ async fn dispatch_read_only_tool(
         return (call.id, call.name, result);
     }
 
+    if tools::is_write_tool(&call.name) {
+        if let Some(err) = sandbox_check(&call.name, &call.arguments) {
+            return (
+                call.id,
+                call.name,
+                json!({"ok": false, "error": err}).to_string(),
+            );
+        }
+        if call.name == "run_command"
+            && let Some(err) = dangerous_command_check(&call.arguments)
+        {
+            return (
+                call.id,
+                call.name,
+                json!({"ok": false, "error": err}).to_string(),
+            );
+        }
+    }
+
     let summary = tools::describe_call(&call.name, &call.arguments);
     let _ = events.send(StreamEvent::ToolCall {
         summary: summary.clone(),
     });
+    let file_op_snapshot = capture_file_op_snapshot(&call.name, &call.arguments);
     let started = Instant::now();
     let result = tools::run(&call.name, &call.arguments).await;
     let (ok, err) = parse_tool_result_status(&result);
@@ -425,6 +522,12 @@ async fn dispatch_read_only_tool(
         elapsed_ms: started.elapsed().as_millis(),
         error: err,
     });
+    if let Some(snapshot) = file_op_snapshot
+        && let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&result)
+        && result_json["ok"].as_bool().unwrap_or(false)
+    {
+        emit_file_op_event(snapshot, &result_json, &events);
+    }
     (call.id, call.name, result)
 }
 
@@ -463,47 +566,12 @@ async fn dispatch_tool(
     let summary = tools::describe_call(&call.name, &call.arguments);
 
     // Plan tools — display only, no approval or filesystem access needed.
-    if call.name == "set_plan" {
-        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
-            let tasks = args["steps"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let _ = events.send(StreamEvent::PlanSet { tasks });
-        }
-        return json!({"ok": true}).to_string();
-    }
-    if call.name == "complete_task" {
-        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments)
-            && let Some(index) = args["index"].as_u64()
-        {
-            let _ = events.send(StreamEvent::PlanTaskDone {
-                index: index as usize,
-            });
-        }
-        return json!({"ok": true}).to_string();
+    if let Some(result) = try_plan_tool(call, events) {
+        return result;
     }
 
-    // Anti-loop guard: refuse if the model is calling the exact same (tool, args) repeatedly.
-    {
-        let key = (call.name.clone(), call.arguments.clone());
-        let count = approval_state.call_counts.entry(key).or_insert(0);
-        *count += 1;
-        if *count > MAX_IDENTICAL_CALLS {
-            return json!({
-                "ok": false,
-                "error": format!(
-                    "Refusing to run '{}' again: this identical call has already been made {} time(s) \
-                    this turn. Do NOT retry — stop and report the failure to the user.",
-                    call.name, *count - 1
-                )
-            })
-            .to_string();
-        }
+    if let Some(refusal) = anti_loop_refusal(approval_state, call) {
+        return refusal;
     }
 
     if tools::is_write_tool(&call.name) {
@@ -1584,8 +1652,12 @@ mod tests {
         assert!(is_tool_parameter_error("unknown parameter: tools"));
         // False-positive guard — generic errors that mention "tool" must NOT disable tools
         assert!(!is_tool_parameter_error("tool call timed out"));
-        assert!(!is_tool_parameter_error("your tool result exceeded the context window"));
-        assert!(!is_tool_parameter_error("OpenAIException: unexpected content after document"));
+        assert!(!is_tool_parameter_error(
+            "your tool result exceeded the context window"
+        ));
+        assert!(!is_tool_parameter_error(
+            "OpenAIException: unexpected content after document"
+        ));
         assert!(!is_tool_parameter_error("rate limit exceeded"));
         assert!(is_stream_options_error("Unknown field stream_options"));
         assert!(!is_stream_options_error("rate limit exceeded"));
