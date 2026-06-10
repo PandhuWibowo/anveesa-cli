@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "anveesa"
-version = "0.7.8"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "axum",

@@ -1,6 +1,6 @@
 {
   "name": "anveesa",
-  "version": "0.7.8",
+  "version": "0.7.9",
   "description": "Multi-provider terminal AI assistant — TUI, web UI, and one-shot mode backed by any OpenAI-compatible API",
   "main": "bin/anveesa.js",
   "bin": {
