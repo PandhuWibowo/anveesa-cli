@@ -12,8 +12,8 @@ use std::{
 
 use anyhow::Result;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent,
-    MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
@@ -341,13 +341,19 @@ impl App {
 // ── Main TUI loop ─────────────────────────────────────────────────────────────
 
 pub async fn run(mut app: App) -> Result<Vec<ChatMessage>> {
-    crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+    // Bracketed paste is required for Event::Paste — without it a multi-line
+    // paste arrives as typed keys and every newline submits a prompt.
+    crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let mut terminal = ratatui::init();
     terminal.clear()?;
     let result = event_loop(&mut terminal, &mut app).await;
     ratatui::restore();
     // Always release mouse capture on exit so the terminal works normally.
-    crossterm::execute!(std::io::stdout(), DisableMouseCapture)?;
+    crossterm::execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )?;
     result
 }
 
@@ -410,7 +416,9 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec
 async fn handle_event(app: &mut App, event: Event) -> Result<()> {
     match event {
         Event::Mouse(MouseEvent { kind, .. }) => handle_mouse(app, kind),
-        Event::Key(key) => handle_key(app, key).await?,
+        // Windows and kitty-protocol terminals deliver Release (and Repeat)
+        // events too — acting on Release doubles every keystroke.
+        Event::Key(key) if key.kind != KeyEventKind::Release => handle_key(app, key).await?,
         // Cmd+V / terminal paste — insert text, or attach image if paste is empty
         Event::Paste(text) => {
             if app.mode != Mode::Input {
