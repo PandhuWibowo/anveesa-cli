@@ -186,8 +186,6 @@ struct ViewState {
     mouse_capture: bool,
     /// Cached formatted lines per message index: Option<(content_hash, lines)>. Indexed by msg index.
     render_cache: Vec<Option<(u64, Vec<ratatui::text::Line<'static>>)>>,
-    /// Length of streaming_buf last time we rendered (for skip-diff).
-    render_cache_streaming_len: usize,
     /// Last time we drew a frame (for render throttling during streaming).
     last_render: Option<std::time::Instant>,
 }
@@ -334,7 +332,6 @@ impl App {
                 search_scroll_saved: 0,
                 mouse_capture: true,
                 render_cache: Vec::new(),
-                render_cache_streaming_len: 0,
                 last_render: None,
             },
         }
@@ -355,29 +352,30 @@ pub async fn run(mut app: App) -> Result<Vec<ChatMessage>> {
 }
 
 async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec<ChatMessage>> {
+    let mut dirty = true; // draw the first frame
     loop {
         if app.quit {
             break;
         }
-        // Throttle drawing during streaming (~20 fps cap) but NEVER skip event
-        // processing — a skipped frame is repainted on the next 80 ms tick,
-        // while a skipped event would back up the channel and freeze the UI.
-        let needs_render = app.mode != Mode::Streaming
-            || app.live.streaming_buf.len() != app.view.render_cache_streaming_len
-            || !app.live.pending_tools.is_empty();
+        // Draw only when state changed (dirty), throttled to ~20 fps during
+        // streaming. Event processing is NEVER skipped — a skipped frame is
+        // repainted on the next tick, while a skipped event would back up the
+        // channel and freeze the UI. When idle (Input mode, no events) the
+        // loop draws nothing at all, so a long transcript costs zero CPU.
         let throttled = app.mode == Mode::Streaming
             && app
                 .view
                 .last_render
                 .is_some_and(|t| t.elapsed() < Duration::from_millis(50));
-        if needs_render && !throttled {
+        if dirty && !throttled {
             terminal.draw(|f| render(f, app))?;
             app.view.last_render = Some(std::time::Instant::now());
-            app.view.render_cache_streaming_len = app.live.streaming_buf.len();
+            dirty = false;
         }
         tokio::select! {
             Some(ev) = app.key_rx.recv() => {
                 handle_event(app, ev).await?;
+                dirty = true;
             }
             Some(tui_ev) = app.stream_rx.recv() => {
                 handle_stream_event(app, tui_ev).await;
@@ -393,10 +391,13 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Vec
                         Err(_) => break,
                     }
                 }
+                dirty = true;
             }
             _ = tokio::time::sleep(Duration::from_millis(80)) => {
-                if app.mode == Mode::Streaming {
+                // Animate spinners only while something is actually running.
+                if app.mode == Mode::Streaming || !app.live.pending_tools.is_empty() {
                     app.spinner_frame = app.spinner_frame.wrapping_add(1);
+                    dirty = true;
                 }
             }
         }

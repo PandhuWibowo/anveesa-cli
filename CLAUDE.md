@@ -4,7 +4,7 @@
 
 A multi-provider terminal AI assistant written in Rust (edition 2024). Ships a full TUI, a browser web UI, and a one-shot CLI mode. Every AI provider that speaks the OpenAI chat/completions API works out of the box.
 
-**Version:** 0.7.7 | **Tests:** 692 passing (683 unit + 9 doc) | **Warnings:** 0
+**Version:** 0.7.8 | **Tests:** 696 passing (687 unit + 9 doc) | **Warnings:** 0
 
 ## Module map
 
@@ -61,14 +61,14 @@ Top-level App keeps: `mode`, `confirm`, `provider`, `model`, `usage`, `config`, 
 - **cargo clippy --all-targets -- -D warnings** — CI runs this on Ubuntu (covers test code too). Test locally too.
 - **No new dependencies** without good reason — Cargo.toml is deliberately lean.
 - **Tests live in the same file** as the code they test (bottom `#[cfg(test)] mod tests`).
-- **692 tests** — `cargo test` must stay green.
+- **696 tests** — `cargo test` must stay green.
 
 ## Build & test
 
 ```bash
 cargo build          # dev build
 cargo build --release # production binary
-cargo test           # 692 tests
+cargo test           # 696 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -107,8 +107,8 @@ Uses axum 0.7. Routes:
 
 ## TUI Performance
 
-- **Render cache:** `app.view.render_cache` uses O(1) index lookups with hash-based change detection. Only re-format messages whose content hash changed; the hash includes the render width so a terminal resize invalidates stale wrapping.
-- **Streaming optimization:** During streaming, only the last streaming buffer gets re-formatted per frame (not all historical messages).
+- **Render cache:** ALL message variants are cached (`message_hash` covers content, width, focus, collapse, model). Per frame, offsets come from cached lengths and only the visible window of lines is cloned — per-frame cost is O(viewport), independent of transcript length.
+- **Idle = zero redraws:** the event loop only draws when state changed (dirty flag); spinners animate only while streaming or tools run. An idle TUI with a huge transcript costs ~0 CPU.
 - **Render throttling:** During streaming, draws are capped at ~20fps (50ms interval). The throttle skips only the draw — event processing is NEVER skipped, and the event loop batch-drains queued stream events after each recv. Concurrent tools are tracked in `app.live.pending_tools` (a Vec; ToolDone matches by summary). The messages widget renders only the visible line slice (Paragraph::scroll is u16 and would wrap past 65535 lines).
 - **Scroll stability:** `finish_turn` resets `auto_scroll = true` and `mode = Input` so the next turn starts scrolled to bottom.
 

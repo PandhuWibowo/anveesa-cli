@@ -254,242 +254,35 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width.saturating_sub(4) as usize;
-    let mut lines: Vec<Line<'static>> = vec![Line::from("")];
-    let mut msg_offsets: Vec<usize> = Vec::with_capacity(app.view.messages.len());
+    let visible = area.height as usize;
+    let msg_count = app.view.messages.len();
+
     let mut cache = std::mem::take(&mut app.view.render_cache);
-    // Ensure cache is sized for all messages — O(1) index lookups.
-    if cache.len() < app.view.messages.len() {
-        cache.resize_with(app.view.messages.len(), || None);
+    if cache.len() < msg_count {
+        cache.resize_with(msg_count, || None);
+    }
+    if cache.len() > msg_count {
+        cache.truncate(msg_count); // messages shrank (/clear)
     }
 
-    for (msg_idx, msg) in app.view.messages.iter().enumerate() {
-        msg_offsets.push(lines.len());
-        let focused = app.view.msg_focus == Some(msg_idx);
-        let _ = focused; // used below in FileOp branch
-        match msg {
-            Msg::User { text } => {
-                // Width is part of the key: a resize must invalidate old wrapping.
-                let h = content_hash(&format!("user:{}:{}:{}", msg_idx, width, text));
-                if let Some((_ch, clines)) = cache
-                    .get(msg_idx)
-                    .cloned()
-                    .and_then(|o| o.filter(|(x, _)| *x == h))
-                {
-                    lines.extend(clines);
-                } else {
-                    let mut ml: Vec<Line<'static>> = vec![user_header()];
-                    for l in wrap_text(text, width) {
-                        ml.push(Line::from(format!("    {l}")));
-                    }
-                    ml.push(Line::from(""));
-                    cache[msg_idx] = Some((h, ml.clone()));
-                    lines.extend(ml);
-                }
-            }
-            Msg::Assistant { text } => {
-                let h = content_hash(&format!("assistant:{}:{}:{}", msg_idx, width, text));
-                if let Some((_ch, clines)) = cache
-                    .get(msg_idx)
-                    .cloned()
-                    .and_then(|o| o.filter(|(x, _)| *x == h))
-                {
-                    lines.extend(clines);
-                } else {
-                    let mut ml: Vec<Line<'static>> = vec![assistant_header(&app.model)];
-                    for l in format_assistant_lines(text, width) {
-                        ml.push(l);
-                    }
-                    ml.push(Line::from(""));
-                    cache[msg_idx] = Some((h, ml.clone()));
-                    lines.extend(ml);
-                }
-            }
-            Msg::Tool {
-                done,
-                ok,
-                text,
-                elapsed_ms,
-            } => {
-                let (icon, color) = if !done {
-                    ("⠋", Color::DarkGray)
-                } else if *ok {
-                    ("✓", Color::Rgb(152, 195, 121))
-                } else {
-                    ("✗", Color::Rgb(224, 108, 117))
-                };
-                let elapsed_str = match elapsed_ms {
-                    Some(ms) if *ms < 1000 => format!("  {ms}ms"),
-                    Some(ms) => format!("  {:.1}s", *ms as f64 / 1000.0),
-                    None => String::new(),
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {icon} {text}"), Style::default().fg(color)),
-                    Span::styled(elapsed_str, Style::default().fg(Color::Rgb(80, 80, 100))),
-                ]));
-                lines.push(Line::from(""));
-            }
-            Msg::FileOp {
-                verb,
-                path,
-                added,
-                removed,
-                diff,
-                collapsed,
-            } => {
-                let focus_icon = if focused { "►" } else { " " };
-                let header_bg = if focused {
-                    Color::Rgb(25, 25, 50)
-                } else {
-                    Color::Reset
-                };
-                let toggle_hint = if *collapsed {
-                    format!("  [▶ {} lines]", diff.len())
-                } else if diff.len() > 8 {
-                    "  [▼ collapse]".to_string()
-                } else {
-                    String::new()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!(" {focus_icon}📄 "),
-                        Style::default().fg(Color::Rgb(229, 192, 123)).bg(header_bg),
-                    ),
-                    Span::styled(
-                        format!("{verb} "),
-                        Style::default().fg(Color::White).bg(header_bg),
-                    ),
-                    Span::styled(
-                        path.clone(),
-                        Style::default().fg(Color::Rgb(97, 175, 239)).bg(header_bg),
-                    ),
-                    Span::styled(
-                        format!("  +{added}"),
-                        Style::default().fg(Color::Rgb(152, 195, 121)).bg(header_bg),
-                    ),
-                    Span::styled(
-                        format!(" -{removed}"),
-                        Style::default().fg(Color::Rgb(224, 108, 117)).bg(header_bg),
-                    ),
-                    Span::styled(
-                        toggle_hint,
-                        Style::default().fg(Color::Rgb(80, 80, 100)).bg(header_bg),
-                    ),
-                ]));
-                if !collapsed {
-                    for (is_add, line) in diff.iter().take(40) {
-                        let (prefix, color) = if *is_add {
-                            ("  + ", Color::Rgb(152, 195, 121))
-                        } else {
-                            ("  - ", Color::Rgb(224, 108, 117))
-                        };
-                        let bg = if *is_add {
-                            Color::Rgb(20, 35, 20)
-                        } else {
-                            Color::Rgb(35, 20, 20)
-                        };
-                        lines.push(Line::from(Span::styled(
-                            format!(
-                                "{prefix}{}",
-                                &line
-                                    .trim_end()
-                                    .chars()
-                                    .take(width.saturating_sub(6))
-                                    .collect::<String>()
-                            ),
-                            Style::default().fg(color).bg(bg),
-                        )));
-                    }
-                    if diff.len() > 40 {
-                        lines.push(Line::from(Span::styled(
-                            format!("  … {} more lines", diff.len() - 40),
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                    }
-                }
-                lines.push(Line::from(""));
-            }
-            Msg::Thinking { text, collapsed } => {
-                let focus_icon = if focused { "►" } else { " " };
-                let header_bg = if focused {
-                    Color::Rgb(25, 25, 50)
-                } else {
-                    Color::Reset
-                };
-                let word_count = text.split_whitespace().count();
-                if *collapsed {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!(" {focus_icon}🤔 "),
-                            Style::default().fg(Color::Rgb(180, 140, 60)).bg(header_bg),
-                        ),
-                        Span::styled(
-                            format!("thinking  [{word_count} words]"),
-                            Style::default().fg(Color::DarkGray).bg(header_bg),
-                        ),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!(" {focus_icon}🤔 "),
-                            Style::default().fg(Color::Rgb(180, 140, 60)).bg(header_bg),
-                        ),
-                        Span::styled(
-                            "thinking [▼ collapse]",
-                            Style::default().fg(Color::Rgb(80, 80, 100)).bg(header_bg),
-                        ),
-                    ]));
-                    for line in text.lines().take(50) {
-                        let w = width.saturating_sub(6);
-                        let trunc: String = line.chars().take(w).collect();
-                        lines.push(Line::from(Span::styled(
-                            format!("    {trunc}"),
-                            Style::default()
-                                .fg(Color::Rgb(130, 110, 60))
-                                .bg(Color::Rgb(22, 20, 12)),
-                        )));
-                    }
-                    if text.lines().count() > 50 {
-                        lines.push(Line::from(Span::styled(
-                            "    …",
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                    }
-                }
-                lines.push(Line::from(""));
-            }
-            Msg::Error(msg) => {
-                lines.push(Line::from(Span::styled(
-                    format!("  ✗ {msg}"),
-                    Style::default().fg(Color::Rgb(224, 108, 117)),
-                )));
-                lines.push(Line::from(""));
-            }
-            Msg::System(msg) => {
-                for l in msg.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  · {l}"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-                lines.push(Line::from(""));
-            }
-            Msg::Separator => {
-                // Thin line between turns — signals "AI is done, your turn"
-                let line_width = width.saturating_sub(2);
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", "─".repeat(line_width.min(60))),
-                    Style::default().fg(Color::Rgb(45, 45, 65)),
-                )));
-                lines.push(Line::from(""));
-            }
+    // Pass 1: refresh stale cache entries (only changed messages re-format)
+    // and compute line offsets from cached lengths — no per-frame clones.
+    let mut msg_offsets: Vec<usize> = Vec::with_capacity(msg_count);
+    let mut running = 1usize; // leading blank line
+    for (i, msg) in app.view.messages.iter().enumerate() {
+        let focused = app.view.msg_focus == Some(i);
+        let h = message_hash(msg, width, focused, &app.model);
+        let fresh = cache[i].as_ref().is_some_and(|(eh, _)| *eh == h);
+        if !fresh {
+            cache[i] = Some((h, format_message(msg, width, focused, &app.model)));
         }
+        msg_offsets.push(running);
+        running += cache[i].as_ref().map(|(_, l)| l.len()).unwrap_or(0);
     }
 
-    app.view.render_cache = cache;
-    app.view.msg_line_offsets = msg_offsets;
-
-    // Live pending tools (running, not yet committed) — one animated line each,
-    // since agent mode runs several tools concurrently.
+    // Dynamic tail — pending tool spinners, live streaming text, padding.
+    // Small and rebuilt every frame.
+    let mut tail: Vec<Line<'static>> = Vec::new();
     if !app.live.pending_tools.is_empty() {
         let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let dot = dots[app.spinner_frame % dots.len()];
@@ -500,22 +293,22 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 format!(" ({:.1}s)", elapsed)
             };
-            lines.push(Line::from(vec![Span::styled(
+            tail.push(Line::from(vec![Span::styled(
                 format!("  {dot} {}{}", tool.summary, elapsed_str),
                 Style::default().fg(Color::Rgb(180, 140, 60)),
             )]));
         }
-        lines.push(Line::from(""));
+        tail.push(Line::from(""));
     }
 
     // In-progress streaming — assistant message being built token by token
     if !app.live.streaming_buf.is_empty()
         || (app.mode == Mode::Streaming && app.live.pending_tools.is_empty())
     {
-        lines.push(assistant_header(&app.model));
+        tail.push(assistant_header(&app.model));
         if !app.live.streaming_buf.is_empty() {
             for l in format_assistant_lines(&app.live.streaming_buf, width) {
-                lines.push(l);
+                tail.push(l);
             }
         } else {
             let dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -535,37 +328,62 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 app.live.tool_status.as_str()
             };
-            lines.push(Line::from(Span::styled(
+            tail.push(Line::from(Span::styled(
                 format!("    {dot} {status}{elapsed_str}"),
                 Style::default().fg(Color::Rgb(180, 140, 60)),
             )));
         }
-        lines.push(Line::from(""));
+        tail.push(Line::from(""));
     }
 
-    // Add bottom padding so wrapped last lines are never cut off by viewport
+    // Bottom padding so the last lines are never cut off by the viewport
     for _ in 0..3 {
-        lines.push(Line::from(""));
+        tail.push(Line::from(""));
     }
 
-    let total = lines.len();
+    let total = running + tail.len();
     app.view.total_lines = total;
-    let visible = area.height as usize;
+    app.view.msg_line_offsets = msg_offsets;
+
     let scroll = if app.view.auto_scroll || app.view.scroll == usize::MAX {
         // Auto-scroll: use logical line count, not visual-row estimate.
-        // visual_rows fluctuates as streaming tokens arrive (wrapping changes),
-        // causing scroll jitter. total (logical lines) is stable during streaming.
         total.saturating_sub(visible)
     } else {
         app.view.scroll.min(total.saturating_sub(1))
     };
     app.view.scroll = scroll;
+    let end = scroll + visible;
 
-    // Render only the visible slice — Paragraph::scroll is u16 and wraps past
-    // 65535 lines, and slicing keeps the per-frame cost O(viewport) instead of
-    // O(history). Lines are already pre-wrapped to width, so slicing is exact.
-    let mut widget_lines: Vec<Line<'static>> =
-        lines.into_iter().skip(scroll).take(visible).collect();
+    // Materialize ONLY the visible window — clone at most `visible` lines,
+    // regardless of transcript length.
+    let mut widget_lines: Vec<Line<'static>> = Vec::with_capacity(visible.min(total));
+    if scroll == 0 && visible > 0 {
+        widget_lines.push(Line::from("")); // the leading blank line
+    }
+    let mut pos = 1usize;
+    for entry in cache.iter().take(msg_count) {
+        let Some((_, ml)) = entry else { continue };
+        let len = ml.len();
+        if pos + len <= scroll {
+            pos += len;
+            continue;
+        }
+        if pos >= end {
+            break;
+        }
+        let start = scroll.saturating_sub(pos);
+        let stop = len.min(end - pos);
+        widget_lines.extend(ml[start..stop].iter().cloned());
+        pos += len;
+    }
+    for (j, l) in tail.iter().enumerate() {
+        let p = running + j;
+        if p >= scroll && p < end {
+            widget_lines.push(l.clone());
+        }
+    }
+
+    app.view.render_cache = cache;
 
     // "↓ unread" badge on the bottom viewport row when scrolled away
     if !app.view.auto_scroll && app.live.unread_count > 0 && visible > 0 {
@@ -583,6 +401,243 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     frame.render_widget(Paragraph::new(widget_lines), area);
+}
+
+/// Cache key for a message's formatted lines — covers everything that can
+/// change the output: content, render width, focus, collapse state, model.
+fn message_hash(msg: &Msg, width: usize, focused: bool, model: &str) -> u64 {
+    let key = match msg {
+        Msg::User { text } => format!("u:{width}:{text}"),
+        Msg::Assistant { text } => format!("a:{width}:{model}:{text}"),
+        Msg::Tool {
+            done,
+            ok,
+            text,
+            elapsed_ms,
+        } => format!("t:{done}:{ok}:{elapsed_ms:?}:{text}"),
+        Msg::FileOp {
+            verb,
+            path,
+            added,
+            removed,
+            diff,
+            collapsed,
+        } => {
+            // diff contents are immutable; a length fingerprint is enough.
+            let fp: usize = diff.iter().map(|(a, l)| l.len() + *a as usize).sum();
+            format!(
+                "f:{width}:{focused}:{collapsed}:{verb}:{path}:{added}:{removed}:{}:{fp}",
+                diff.len()
+            )
+        }
+        Msg::Thinking { text, collapsed } => {
+            format!("k:{width}:{focused}:{collapsed}:{text}")
+        }
+        Msg::Error(e) => format!("e:{e}"),
+        Msg::System(s) => format!("s:{s}"),
+        Msg::Separator => format!("sep:{width}"),
+    };
+    content_hash(&key)
+}
+
+/// Format one committed message into its display lines. Pure — the result is
+/// cached under `message_hash` and reused until the message changes.
+fn format_message(msg: &Msg, width: usize, focused: bool, model: &str) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    match msg {
+        Msg::User { text } => {
+            lines.push(user_header());
+            for l in wrap_text(text, width) {
+                lines.push(Line::from(format!("    {l}")));
+            }
+            lines.push(Line::from(""));
+        }
+        Msg::Assistant { text } => {
+            lines.push(assistant_header(model));
+            for l in format_assistant_lines(text, width) {
+                lines.push(l);
+            }
+            lines.push(Line::from(""));
+        }
+        Msg::Tool {
+            done,
+            ok,
+            text,
+            elapsed_ms,
+        } => {
+            let (icon, color) = if !done {
+                ("⠋", Color::DarkGray)
+            } else if *ok {
+                ("✓", Color::Rgb(152, 195, 121))
+            } else {
+                ("✗", Color::Rgb(224, 108, 117))
+            };
+            let elapsed_str = match elapsed_ms {
+                Some(ms) if *ms < 1000 => format!("  {ms}ms"),
+                Some(ms) => format!("  {:.1}s", *ms as f64 / 1000.0),
+                None => String::new(),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {icon} {text}"), Style::default().fg(color)),
+                Span::styled(elapsed_str, Style::default().fg(Color::Rgb(80, 80, 100))),
+            ]));
+            lines.push(Line::from(""));
+        }
+        Msg::FileOp {
+            verb,
+            path,
+            added,
+            removed,
+            diff,
+            collapsed,
+        } => {
+            let focus_icon = if focused { "►" } else { " " };
+            let header_bg = if focused {
+                Color::Rgb(25, 25, 50)
+            } else {
+                Color::Reset
+            };
+            let toggle_hint = if *collapsed {
+                format!("  [▶ {} lines]", diff.len())
+            } else if diff.len() > 8 {
+                "  [▼ collapse]".to_string()
+            } else {
+                String::new()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {focus_icon}📄 "),
+                    Style::default().fg(Color::Rgb(229, 192, 123)).bg(header_bg),
+                ),
+                Span::styled(
+                    format!("{verb} "),
+                    Style::default().fg(Color::White).bg(header_bg),
+                ),
+                Span::styled(
+                    path.clone(),
+                    Style::default().fg(Color::Rgb(97, 175, 239)).bg(header_bg),
+                ),
+                Span::styled(
+                    format!("  +{added}"),
+                    Style::default().fg(Color::Rgb(152, 195, 121)).bg(header_bg),
+                ),
+                Span::styled(
+                    format!(" -{removed}"),
+                    Style::default().fg(Color::Rgb(224, 108, 117)).bg(header_bg),
+                ),
+                Span::styled(
+                    toggle_hint,
+                    Style::default().fg(Color::Rgb(80, 80, 100)).bg(header_bg),
+                ),
+            ]));
+            if !collapsed {
+                for (is_add, line) in diff.iter().take(40) {
+                    let (prefix, color) = if *is_add {
+                        ("  + ", Color::Rgb(152, 195, 121))
+                    } else {
+                        ("  - ", Color::Rgb(224, 108, 117))
+                    };
+                    let bg = if *is_add {
+                        Color::Rgb(20, 35, 20)
+                    } else {
+                        Color::Rgb(35, 20, 20)
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "{prefix}{}",
+                            &line
+                                .trim_end()
+                                .chars()
+                                .take(width.saturating_sub(6))
+                                .collect::<String>()
+                        ),
+                        Style::default().fg(color).bg(bg),
+                    )));
+                }
+                if diff.len() > 40 {
+                    lines.push(Line::from(Span::styled(
+                        format!("  … {} more lines", diff.len() - 40),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+        }
+        Msg::Thinking { text, collapsed } => {
+            let focus_icon = if focused { "►" } else { " " };
+            let header_bg = if focused {
+                Color::Rgb(25, 25, 50)
+            } else {
+                Color::Reset
+            };
+            let word_count = text.split_whitespace().count();
+            if *collapsed {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {focus_icon}🤔 "),
+                        Style::default().fg(Color::Rgb(180, 140, 60)).bg(header_bg),
+                    ),
+                    Span::styled(
+                        format!("thinking  [{word_count} words]"),
+                        Style::default().fg(Color::DarkGray).bg(header_bg),
+                    ),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {focus_icon}🤔 "),
+                        Style::default().fg(Color::Rgb(180, 140, 60)).bg(header_bg),
+                    ),
+                    Span::styled(
+                        "thinking [▼ collapse]",
+                        Style::default().fg(Color::Rgb(80, 80, 100)).bg(header_bg),
+                    ),
+                ]));
+                for line in text.lines().take(50) {
+                    let w = width.saturating_sub(6);
+                    let trunc: String = line.chars().take(w).collect();
+                    lines.push(Line::from(Span::styled(
+                        format!("    {trunc}"),
+                        Style::default()
+                            .fg(Color::Rgb(130, 110, 60))
+                            .bg(Color::Rgb(22, 20, 12)),
+                    )));
+                }
+                if text.lines().count() > 50 {
+                    lines.push(Line::from(Span::styled(
+                        "    …",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+        }
+        Msg::Error(msg) => {
+            lines.push(Line::from(Span::styled(
+                format!("  ✗ {msg}"),
+                Style::default().fg(Color::Rgb(224, 108, 117)),
+            )));
+            lines.push(Line::from(""));
+        }
+        Msg::System(msg) => {
+            for l in msg.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  · {l}"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            lines.push(Line::from(""));
+        }
+        Msg::Separator => {
+            let line_width = width.saturating_sub(2);
+            lines.push(Line::from(Span::styled(
+                format!("  {}", "─".repeat(line_width.min(60))),
+                Style::default().fg(Color::Rgb(45, 45, 65)),
+            )));
+            lines.push(Line::from(""));
+        }
+    }
+    lines
 }
 
 fn user_header() -> Line<'static> {
@@ -767,4 +822,65 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 // model_pricing is used by the parent tui.rs for handle_stream_event
 pub(super) fn get_model_pricing(model: &str) -> (f64, f64, f64, f64) {
     model_pricing(model)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(text: &str) -> Msg {
+        Msg::User {
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn format_message_user_has_header_body_blank() {
+        let lines = format_message(&user("hello"), 80, false, "m");
+        assert_eq!(lines.len(), 3); // header + 1 wrapped line + trailing blank
+    }
+
+    #[test]
+    fn hash_changes_with_width_and_content() {
+        let m = user("hello");
+        let h80 = message_hash(&m, 80, false, "m");
+        let h40 = message_hash(&m, 40, false, "m");
+        assert_ne!(h80, h40, "resize must invalidate cached wrapping");
+        let h2 = message_hash(&user("hello!"), 80, false, "m");
+        assert_ne!(h80, h2);
+        // stable for identical inputs
+        assert_eq!(h80, message_hash(&user("hello"), 80, false, "m"));
+    }
+
+    #[test]
+    fn hash_changes_when_fileop_collapse_toggles() {
+        let mk = |collapsed| Msg::FileOp {
+            verb: "Update".into(),
+            path: "a.rs".into(),
+            added: 1,
+            removed: 1,
+            diff: vec![(true, "x".into()); 10],
+            collapsed,
+        };
+        let open = message_hash(&mk(false), 80, false, "m");
+        let closed = message_hash(&mk(true), 80, false, "m");
+        assert_ne!(open, closed);
+        // and the rendered length actually differs
+        assert!(
+            format_message(&mk(false), 80, false, "m").len()
+                > format_message(&mk(true), 80, false, "m").len()
+        );
+    }
+
+    #[test]
+    fn hash_changes_with_focus() {
+        let m = Msg::Thinking {
+            text: "hmm".into(),
+            collapsed: true,
+        };
+        assert_ne!(
+            message_hash(&m, 80, true, "m"),
+            message_hash(&m, 80, false, "m")
+        );
+    }
 }
