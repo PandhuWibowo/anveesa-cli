@@ -704,6 +704,8 @@ fn stream_event_file_op() {
         removed: 0,
         preview,
         truncated: false,
+        old_content: None,
+        after_approval: false,
     };
     match e {
         StreamEvent::FileOp {

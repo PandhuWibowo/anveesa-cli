@@ -145,6 +145,12 @@ pub enum StreamEvent {
         removed: usize,
         preview: Vec<DiffLine>,
         truncated: bool,
+        /// Full file content BEFORE the tool ran (None = file did not exist).
+        /// Captured pre-run so /undo can restore it.
+        old_content: Option<String>,
+        /// The user already reviewed this diff in an approval preview —
+        /// renderers may print a compact line instead of the full diff.
+        after_approval: bool,
     },
     /// The model announced a multi-step plan.
     PlanSet { tasks: Vec<String> },

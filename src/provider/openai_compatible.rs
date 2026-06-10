@@ -526,7 +526,7 @@ async fn dispatch_tool_concurrent(
         && let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&result)
         && result_json["ok"].as_bool().unwrap_or(false)
     {
-        emit_file_op_event(snapshot, &result_json, &events);
+        emit_file_op_event(snapshot, &result_json, &events, false);
     }
     (call.id, call.name, result)
 }
@@ -643,14 +643,14 @@ async fn dispatch_tool(
         error,
     });
 
-    // When the user already reviewed the diff in the approval preview, skip the
-    // post-run FileOp so the same diff isn't printed twice.
-    if !preview_was_shown
-        && let Some(snapshot) = file_op_snapshot
+    // Always emit the post-run FileOp — it carries the pre-run content that
+    // /undo restores. after_approval lets renderers avoid re-printing a diff
+    // the user already reviewed in the approval preview.
+    if let Some(snapshot) = file_op_snapshot
         && let Ok(result_json) = serde_json::from_str::<serde_json::Value>(&result)
         && result_json["ok"].as_bool().unwrap_or(false)
     {
-        emit_file_op_event(snapshot, &result_json, events);
+        emit_file_op_event(snapshot, &result_json, events, preview_was_shown);
     }
 
     result
@@ -679,16 +679,30 @@ enum FileOpSnapshot {
         path: String,
         lines: Vec<String>,
         total: usize,
+        /// File content before the write (None = new file) — powers /undo.
+        pre_content: Option<String>,
     },
     Edit {
         path: String,
         start_line: usize,
         old_lines: Vec<String>,
         new_lines: Vec<String>,
+        pre_content: Option<String>,
     },
     CreateDir {
         path: String,
     },
+}
+
+/// Don't keep undo snapshots of huge files in memory.
+const MAX_UNDO_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024;
+
+fn read_pre_content(path: &str) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_UNDO_SNAPSHOT_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 fn capture_file_op_snapshot(tool_name: &str, arguments: &str) -> Option<FileOpSnapshot> {
@@ -699,18 +713,21 @@ fn capture_file_op_snapshot(tool_name: &str, arguments: &str) -> Option<FileOpSn
             let content = args["content"].as_str().unwrap_or("");
             let all: Vec<String> = content.lines().map(str::to_string).collect();
             let total = all.len();
+            let pre_content = read_pre_content(&path);
             Some(FileOpSnapshot::Write {
                 path,
                 lines: all.into_iter().take(20).collect(),
                 total,
+                pre_content,
             })
         }
         "edit_file" => {
             let path = args["path"].as_str()?.to_string();
             let old = args["old_string"].as_str().unwrap_or("");
             let new = args["new_string"].as_str().unwrap_or("");
-            let start_line = std::fs::read_to_string(&path)
-                .ok()
+            let pre_content = read_pre_content(&path);
+            let start_line = pre_content
+                .as_deref()
                 .and_then(|content| {
                     let pos = content.find(old)?;
                     Some(content[..pos].lines().count() + 1)
@@ -721,6 +738,7 @@ fn capture_file_op_snapshot(tool_name: &str, arguments: &str) -> Option<FileOpSn
                 start_line,
                 old_lines: old.lines().map(str::to_string).collect(),
                 new_lines: new.lines().map(str::to_string).collect(),
+                pre_content,
             })
         }
         "create_dir" => {
@@ -735,11 +753,17 @@ fn emit_file_op_event(
     snapshot: FileOpSnapshot,
     result: &serde_json::Value,
     events: &tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+    after_approval: bool,
 ) {
     const MAX_PREVIEW: usize = 20;
 
     let event = match snapshot {
-        FileOpSnapshot::Write { path, lines, total } => {
+        FileOpSnapshot::Write {
+            path,
+            lines,
+            total,
+            pre_content,
+        } => {
             let verb = if result["created"].as_bool().unwrap_or(true) {
                 "Create"
             } else {
@@ -763,6 +787,8 @@ fn emit_file_op_event(
                 removed: 0,
                 preview,
                 truncated,
+                old_content: pre_content,
+                after_approval,
             }
         }
         FileOpSnapshot::Edit {
@@ -770,6 +796,7 @@ fn emit_file_op_event(
             start_line,
             old_lines,
             new_lines,
+            pre_content,
         } => {
             let added = new_lines.len();
             let removed = old_lines.len();
@@ -800,6 +827,8 @@ fn emit_file_op_event(
                 removed,
                 preview,
                 truncated,
+                old_content: pre_content,
+                after_approval,
             }
         }
         FileOpSnapshot::CreateDir { path } => StreamEvent::FileOp {
@@ -809,6 +838,8 @@ fn emit_file_op_event(
             removed: 0,
             preview: vec![],
             truncated: false,
+            old_content: None,
+            after_approval,
         },
     };
 
@@ -898,7 +929,9 @@ fn build_confirm_preview(
 ) -> ToolConfirmPreview {
     const CAP: usize = 20;
     match snapshot {
-        Some(FileOpSnapshot::Write { path, lines, total }) => {
+        Some(FileOpSnapshot::Write {
+            path, lines, total, ..
+        }) => {
             let verb = if std::path::Path::new(path).exists() {
                 "Update"
             } else {
@@ -928,6 +961,7 @@ fn build_confirm_preview(
             start_line,
             old_lines,
             new_lines,
+            ..
         }) => {
             let truncated = old_lines.len() > CAP || new_lines.len() > CAP;
             let mut diff: Vec<DiffLine> = old_lines

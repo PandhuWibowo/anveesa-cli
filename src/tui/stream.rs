@@ -61,7 +61,7 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
     let tui_tx = app.stream_tx.clone();
     let tui_tx2 = app.stream_tx.clone();
 
-    tokio::spawn(async move {
+    let turn_task = tokio::spawn(async move {
         let request = PromptRequest {
             prompt: text,
             model: options.model.clone(),
@@ -86,6 +86,7 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
             }
         }
     });
+    app.live.turn_abort = Some(turn_task.abort_handle());
 
     tokio::spawn(async move {
         let mut rx = stream_rx_inner;
@@ -111,6 +112,7 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
                     added,
                     removed,
                     preview,
+                    old_content,
                     ..
                 } => {
                     let diff = preview
@@ -126,6 +128,7 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
                         added,
                         removed,
                         diff,
+                        old_content,
                     }
                 }
                 StreamEvent::Confirm { preview, reply } => {
@@ -166,6 +169,20 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
 }
 
 pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
+    // After a cancel the provider task is gone, but already-spawned tool tasks
+    // may still emit events. Drop the ephemeral ones; ToolDone/FileOp are kept
+    // because they describe effects that really happened.
+    if app.mode == Mode::Input
+        && matches!(
+            ev,
+            TuiEvent::Token(_)
+                | TuiEvent::Thinking(_)
+                | TuiEvent::Status(_)
+                | TuiEvent::ToolCall(_)
+        )
+    {
+        return;
+    }
     match ev {
         TuiEvent::Token(text) => {
             if app.live.streaming_started_at.is_none() {
@@ -242,13 +259,19 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             added,
             removed,
             diff,
+            old_content,
         } => {
             flush_streaming_buf(app);
-            let old_content = std::fs::read_to_string(&path).ok();
-            if app.conv.undo_stack.len() >= 20 {
-                app.conv.undo_stack.remove(0);
+            // old_content was captured BEFORE the tool ran (the file already
+            // has the new content by the time this event arrives). None +
+            // "Create" means new file (undo = delete); None on an update means
+            // no snapshot was possible (e.g. file too large) — skip undo then.
+            if old_content.is_some() || verb == "Create" {
+                if app.conv.undo_stack.len() >= 20 {
+                    app.conv.undo_stack.remove(0);
+                }
+                app.conv.undo_stack.push((path.clone(), old_content));
             }
-            app.conv.undo_stack.push((path.clone(), old_content));
             let collapsed = diff.len() > 8;
             app.view.messages.push(Msg::FileOp {
                 verb,
@@ -307,6 +330,7 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             finish_turn(app);
         }
         TuiEvent::Error(msg) => {
+            app.live.turn_abort = None;
             flush_streaming_buf(app);
             commit_all_pending_tools(app, false);
             app.view.messages.push(Msg::Error(msg));
@@ -401,6 +425,36 @@ pub(super) fn flush_streaming_buf(app: &mut App) {
     }
 }
 
+/// Cancel the in-flight turn (Esc / Ctrl+C during streaming). Aborts the
+/// provider task — the HTTP request is dropped mid-stream — and returns the
+/// UI to input mode. Partial output stays visible but is NOT saved to
+/// history, matching the Error path.
+pub(super) fn cancel_turn(app: &mut App) {
+    let Some(handle) = app.live.turn_abort.take() else {
+        return;
+    };
+    handle.abort();
+    flush_streaming_buf(app);
+    commit_all_pending_tools(app, false);
+    if !app.live.thinking_buf.is_empty() {
+        let text = std::mem::take(&mut app.live.thinking_buf);
+        app.view.messages.push(Msg::Thinking {
+            text,
+            collapsed: true,
+        });
+    }
+    app.live.accumulated_response.clear();
+    app.live.pending_prompt.clear();
+    app.view
+        .messages
+        .push(Msg::System("Cancelled. (response not saved)".to_string()));
+    app.mode = Mode::Input;
+    app.view.auto_scroll = true;
+    app.view.scroll = usize::MAX;
+    app.live.tool_status.clear();
+    app.live.streaming_started_at = None;
+}
+
 /// Commit any tools still marked pending (e.g. the stream ended or errored
 /// before their ToolDone arrived) so no spinner is left behind.
 pub(super) fn commit_all_pending_tools(app: &mut App, ok: bool) {
@@ -415,6 +469,7 @@ pub(super) fn commit_all_pending_tools(app: &mut App, ok: bool) {
 }
 
 pub(super) fn finish_turn(app: &mut App) {
+    app.live.turn_abort = None;
     commit_all_pending_tools(app, true);
     if !app.live.thinking_buf.is_empty() {
         let text = std::mem::take(&mut app.live.thinking_buf);

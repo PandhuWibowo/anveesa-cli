@@ -50,6 +50,8 @@ pub enum TuiEvent {
         added: usize,
         removed: usize,
         diff: Vec<(bool, String)>,
+        /// File content before the tool ran (None = new file) — undo snapshot.
+        old_content: Option<String>,
     },
     Confirm {
         summary: String,
@@ -139,6 +141,9 @@ struct InputState {
     pending_images: Vec<ImageAttachment>,
     last_image_fp: Option<String>,
     tab_state: Option<(String, Vec<String>, usize)>,
+    /// A prompt a slash command wants submitted (e.g. /retry, /init, custom
+    /// commands) — picked up by the Enter handler after the command returns.
+    queued_submit: Option<String>,
 }
 
 struct StreamState {
@@ -155,6 +160,8 @@ struct StreamState {
     thinking_buf: String,
     /// A background compaction summary is being generated.
     compact_in_flight: bool,
+    /// Abort handle for the in-flight provider turn (Esc / Ctrl+C cancel).
+    turn_abort: Option<tokio::task::AbortHandle>,
 }
 
 pub(crate) struct ConvState {
@@ -288,6 +295,7 @@ impl App {
                 pending_images: Vec::new(),
                 last_image_fp: None,
                 tab_state: None,
+                queued_submit: None,
             },
 
             live: StreamState {
@@ -302,6 +310,7 @@ impl App {
                 unread_count: 0,
                 thinking_buf: String::new(),
                 compact_in_flight: false,
+                turn_abort: None,
             },
 
             conv: ConvState {
@@ -465,9 +474,15 @@ async fn handle_key(
         return Ok(());
     }
 
-    // ── Streaming mode: scroll only ───────────────────────────────────────────
+    // ── Streaming mode: cancel or scroll ──────────────────────────────────────
     if app.mode == Mode::Streaming {
         match code {
+            KeyCode::Esc => {
+                stream::cancel_turn(app);
+            }
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                stream::cancel_turn(app);
+            }
             KeyCode::PageUp => {
                 app.view.auto_scroll = false;
                 app.view.scroll = app.view.scroll.saturating_sub(10);
@@ -598,6 +613,8 @@ async fn handle_key(
             app.kbd.tab_state = None;
             if !handle_slash_command(app, &text) {
                 submit_prompt(app, text).await?;
+            } else if let Some(queued) = app.kbd.queued_submit.take() {
+                submit_prompt(app, queued).await?;
             }
         }
 

@@ -126,13 +126,16 @@ pub async fn render_stream(
                     first_token = true;
                     frame = 0;
                 }
-                Some(StreamEvent::FileOp { verb, path, added, removed, preview, truncated }) => {
+                Some(StreamEvent::FileOp { verb, path, added, removed, preview, truncated, after_approval, .. }) => {
                     clear_spinner(spinner, spinner_active);
                     spinner_active = false;
                     if line_open {
                         println!();
                         line_open = false;
                     }
+                    // The approval preview already printed this diff — just
+                    // confirm the apply with a header line.
+                    let preview = if after_approval { vec![] } else { preview };
                     print_file_op(&verb, &path, added, removed, &preview, truncated, spinner);
                     // Re-arm the spinner for the next API round.
                     first_token = true;
