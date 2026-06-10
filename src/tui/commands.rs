@@ -54,7 +54,7 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                  /notes          list saved notes\n\
                  /clear        reset conversation\n\
                  /undo         restore last file changed by AI\n\
-                 /compact      drop old turns to free context\n\
+                 /compact      summarize old turns to free context\n\
                  /copy         copy last response to clipboard\n\
                  /export [path] save conversation as markdown\n\
                  /model [name] · /provider [name] · /status · /exit\n\
@@ -159,91 +159,9 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                     "Conversation has {total_turns} turn(s) — nothing to compact yet (threshold: {keep})."
                 )));
             } else {
-                let drop_turns = total_turns - keep;
-                let drop_msgs = drop_turns * 2;
-                // Summarise dropped content before removing it
-                let dropped_text: String = app.conv.history[..drop_msgs]
-                    .iter()
-                    .map(|m| m.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                // Extract file paths mentioned in dropped turns
-                let mut files: Vec<&str> = dropped_text
-                    .split_whitespace()
-                    .filter(|w| {
-                        w.contains('/')
-                            || w.ends_with(".rs")
-                            || w.ends_with(".ts")
-                            || w.ends_with(".py")
-                            || w.ends_with(".js")
-                            || w.ends_with(".go")
-                    })
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-                files.sort();
-                files.truncate(12);
-                let file_hint = if files.is_empty() {
-                    String::new()
-                } else {
-                    format!("  Files discussed: {}.", files.join(", "))
-                };
-                app.conv.history.drain(..drop_msgs);
-                let msg_count = app.view.messages.len();
-                if msg_count > keep * 3 {
-                    app.view.messages.drain(..(msg_count - keep * 3));
-                }
-                app.conv.seen_paths.clear();
-                // Inject a context breadcrumb so the model knows what was compacted
-                app.conv.history.insert(
-                    0,
-                    crate::provider::ChatMessage::user(format!(
-                        "[Context note: {drop_turns} earlier turn(s) were compacted.{file_hint} \
-                     Use read_file / list_dir to re-inspect any files if needed.]"
-                    )),
-                );
-                app.view.messages.insert(0, Msg::System(format!(
-                    "Context compacted: dropped {drop_turns} older turn(s), keeping the last {keep}.{file_hint}"
-                )));
-                app.view.messages.push(Msg::Separator);
-
-                // Spawn AI-powered summary of dropped content
-                let tx = app.stream_tx.clone();
-                let config = app.config.clone();
-                let provider_name = app.provider.clone();
-                let sample: String = dropped_text.chars().take(5_000).collect();
-                tokio::spawn(async move {
-                    let (dummy_tx, _) =
-                        tokio::sync::mpsc::unbounded_channel::<crate::provider::StreamEvent>();
-                    let request = PromptRequest {
-                        prompt: format!(
-                            "Summarize the following conversation in 2-3 concise sentences. \
-                             Focus on: which files were discussed or modified, what was decided, \
-                             what was implemented. Output ONLY the summary, no preamble:\n\n{sample}"
-                        ),
-                        model: None,
-                        system: None,
-                        workspace_context: None,
-                        history: vec![],
-                        images: vec![],
-                        mcp: None,
-                    };
-                    if let Ok(result) = crate::provider::ask(
-                        &config,
-                        &provider_name,
-                        request,
-                        ApprovalPolicy::Deny,
-                        &dummy_tx,
-                    )
-                    .await
-                        && !result.text.is_empty()
-                    {
-                        let _ = tx.send(TuiEvent::SystemMsg(format!(
-                            "Compact summary: {}",
-                            result.text.trim()
-                        )));
-                    }
-                });
+                // Summarize in the background, then splice the summary into
+                // history. The old turns stay until the summary is ready.
+                super::stream::start_compaction(app, (total_turns - keep) * 2);
             }
             app.kbd.input.clear();
             app.kbd.input_cursor = 0;

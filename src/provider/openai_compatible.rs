@@ -979,6 +979,49 @@ async fn request_approval_with_preview(
     answer.await.unwrap_or(ApprovalDecision::Deny)
 }
 
+/// Minimal non-streaming completion for internal utility calls (e.g. context
+/// compaction summaries). No tools, no events — just system + prompt → text.
+pub async fn complete_text(
+    config: &OpenAiCompatibleProviderConfig,
+    model: &str,
+    system: &str,
+    prompt: &str,
+) -> Result<String> {
+    let prompt_cache = config
+        .prompt_cache
+        .unwrap_or_else(|| is_anthropic_url(&config.base_url));
+    let headers = build_headers(config, prompt_cache)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(Duration::from_secs(120))
+        .build()
+        .context("failed to build HTTP client")?;
+    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+    let body = json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": false,
+        // Some providers (Anthropic-compatible) require max_tokens.
+        "max_tokens": config.max_tokens.unwrap_or(2048).min(4096),
+    });
+    let response = send_with_retry(&client, &url, &headers, &body).await?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("completion failed ({status}): {}", extract_api_error(&text));
+    }
+    let v: Value = serde_json::from_str(&text).context("invalid completion response")?;
+    v["choices"][0]["message"]["content"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .context("completion response had no content")
+}
+
 fn is_anthropic_url(base_url: &str) -> bool {
     base_url.contains("anthropic.com")
 }

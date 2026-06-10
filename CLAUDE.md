@@ -4,7 +4,7 @@
 
 A multi-provider terminal AI assistant written in Rust (edition 2024). Ships a full TUI, a browser web UI, and a one-shot CLI mode. Every AI provider that speaks the OpenAI chat/completions API works out of the box.
 
-**Version:** 0.7.6 | **Tests:** 667 passing (658 unit + 9 doc) | **Warnings:** 0
+**Version:** 0.7.6 | **Tests:** 673 passing (664 unit + 9 doc) | **Warnings:** 0
 
 ## Module map
 
@@ -57,18 +57,18 @@ Top-level App keeps: `mode`, `confirm`, `provider`, `model`, `usage`, `config`, 
 
 - **Zero warnings** — `cargo build` must be clean. `#[allow(...)]` only with a comment.
 - **cargo fmt** — always run before committing; CI enforces `cargo fmt --check`.
-- **cargo clippy -- -D warnings** — CI runs on Ubuntu (stricter than macOS). Test locally too.
+- **cargo clippy --all-targets -- -D warnings** — CI runs this on Ubuntu (covers test code too). Test locally too.
 - **No new dependencies** without good reason — Cargo.toml is deliberately lean.
 - **Tests live in the same file** as the code they test (bottom `#[cfg(test)] mod tests`).
-- **667 tests** — `cargo test` must stay green.
+- **673 tests** — `cargo test` must stay green.
 
 ## Build & test
 
 ```bash
 cargo build          # dev build
 cargo build --release # production binary
-cargo test           # 667 tests
-cargo clippy -- -D warnings
+cargo test           # 673 tests
+cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 

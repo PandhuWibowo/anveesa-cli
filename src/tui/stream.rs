@@ -330,6 +330,34 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
             app.kbd.hist_idx = None;
             app.kbd.tab_state = None;
         }
+        TuiEvent::CompactDone {
+            drop_msgs,
+            first_msg,
+            summary,
+        } => {
+            app.live.compact_in_flight = false;
+            // /clear, /undo, or another compaction may have raced the
+            // summarizer — only splice if the snapshot prefix is intact.
+            if app.conv.history.len() < drop_msgs
+                || app.conv.history.first().map(|m| m.content.as_str()) != Some(first_msg.as_str())
+            {
+                app.view.messages.push(Msg::System(
+                    "Compaction skipped — history changed while summarizing.".to_string(),
+                ));
+                return;
+            }
+            let drop_turns = drop_msgs / 2;
+            let had_summary = summary.is_some();
+            let note = compact_note(drop_turns, summary.as_deref());
+            app.conv.history.drain(..drop_msgs);
+            app.conv.history.insert(0, ChatMessage::user(note));
+            app.conv.seen_paths.clear();
+            app.view.messages.push(Msg::System(if had_summary {
+                format!("Compacted {drop_turns} older turn(s) into a summary.")
+            } else {
+                format!("Compacted: dropped {drop_turns} older turn(s) (summary unavailable).")
+            }));
+        }
     }
 }
 
@@ -438,18 +466,170 @@ fn auto_compact_if_needed(app: &mut App) {
     }
     let total_turns = app.conv.history.len() / 2;
     let drop_turns = (total_turns / 4).max(1).min(total_turns.saturating_sub(4));
-    let drop_msgs = drop_turns * 2;
-    app.conv.history.drain(..drop_msgs);
-    app.conv.seen_paths.clear();
-    app.conv.history.insert(
-        0,
-        ChatMessage::user(format!(
-            "[Context note: {drop_turns} earlier turn(s) were auto-compacted. \
-         Use read_file / list_dir to re-inspect any files if needed.]"
-        )),
-    );
+    start_compaction(app, drop_turns * 2);
+}
+
+/// System prompt for the compaction summarizer.
+const SUMMARIZER_SYSTEM: &str = "You summarize coding-assistant conversations for context \
+compaction. Produce a dense summary that preserves: file paths and code identifiers, \
+decisions made and why, what was implemented or changed, unresolved tasks and known \
+issues, and user preferences or constraints. Use short bullet points. Output only the \
+summary, no preamble.";
+
+const COMPACT_MAX_MSG_CHARS: usize = 4_000;
+const COMPACT_MAX_TRANSCRIPT_CHARS: usize = 24_000;
+
+/// Kick off background summarization of the oldest `drop_msgs` history messages.
+/// The summary is spliced into history when CompactDone arrives; the old turns
+/// stay in place until then so nothing is lost if summarization fails mid-turn.
+pub(super) fn start_compaction(app: &mut App, drop_msgs: usize) {
+    if app.live.compact_in_flight || drop_msgs == 0 || app.conv.history.len() < drop_msgs {
+        return;
+    }
+    let dropped: Vec<ChatMessage> = app.conv.history[..drop_msgs].to_vec();
+    let first_msg = dropped[0].content.clone();
+    app.live.compact_in_flight = true;
     app.view.messages.push(Msg::System(format!(
-        "Auto-compacted: dropped {drop_turns} older turn(s) (~{}k est. tokens). Use /compact for manual control.",
-        estimated / 1000
+        "Compacting: summarizing {} older turn(s) in the background…",
+        drop_msgs / 2
     )));
+
+    let tx = app.stream_tx.clone();
+    let summarizer = summarizer_config(app);
+    tokio::spawn(async move {
+        let summary = match summarizer {
+            Some((cfg, model)) => crate::provider::openai_compatible::complete_text(
+                &cfg,
+                &model,
+                SUMMARIZER_SYSTEM,
+                &compact_transcript(&dropped),
+            )
+            .await
+            .ok(),
+            None => None,
+        };
+        let _ = tx.send(TuiEvent::CompactDone {
+            drop_msgs,
+            first_msg,
+            summary,
+        });
+    });
+}
+
+/// Provider config + model to use for summarization: the provider's fast_model
+/// when configured, otherwise the session model. Command providers can't
+/// summarize (no direct completion API) — they fall back to a plain note.
+fn summarizer_config(app: &App) -> Option<(crate::config::OpenAiCompatibleProviderConfig, String)> {
+    let name = app
+        .config
+        .provider_name(app.options.provider.as_deref())
+        .ok()?;
+    match app.config.providers.get(name)? {
+        crate::config::ProviderConfig::OpenAiCompatible(cfg) => {
+            let model = cfg
+                .fast_model
+                .clone()
+                .or_else(|| app.options.model.clone())
+                .or_else(|| cfg.default_model.clone())?;
+            Some((cfg.clone(), model))
+        }
+        _ => None,
+    }
+}
+
+/// Render dropped turns as a plain transcript, capped so the summarization
+/// request itself stays small.
+fn compact_transcript(turns: &[ChatMessage]) -> String {
+    use crate::provider::ChatRole;
+    let mut out = String::new();
+    for m in turns {
+        let role = match m.role {
+            ChatRole::User => "User",
+            ChatRole::Assistant => "Assistant",
+        };
+        let snippet: String = m.content.chars().take(COMPACT_MAX_MSG_CHARS).collect();
+        let truncated = if snippet.len() < m.content.len() {
+            " …[truncated]"
+        } else {
+            ""
+        };
+        out.push_str(role);
+        out.push_str(":\n");
+        out.push_str(&snippet);
+        out.push_str(truncated);
+        out.push_str("\n\n");
+        if out.len() > COMPACT_MAX_TRANSCRIPT_CHARS {
+            out.push_str("…[transcript truncated]\n");
+            break;
+        }
+    }
+    out
+}
+
+/// The history message that replaces the compacted turns.
+fn compact_note(drop_turns: usize, summary: Option<&str>) -> String {
+    match summary {
+        Some(s) => format!("[Summary of {drop_turns} earlier compacted turn(s):]\n{s}"),
+        None => format!(
+            "[Context note: {drop_turns} earlier turn(s) were compacted. \
+             Use read_file / list_dir to re-inspect any files if needed.]"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ChatMessage;
+
+    #[test]
+    fn transcript_labels_roles() {
+        let turns = vec![
+            ChatMessage::user("fix the bug".into()),
+            ChatMessage::assistant("done, edited src/lib.rs".into()),
+        ];
+        let t = compact_transcript(&turns);
+        assert!(t.contains("User:\nfix the bug"));
+        assert!(t.contains("Assistant:\ndone, edited src/lib.rs"));
+    }
+
+    #[test]
+    fn transcript_truncates_long_messages() {
+        let turns = vec![ChatMessage::user("x".repeat(10_000))];
+        let t = compact_transcript(&turns);
+        assert!(t.contains("…[truncated]"));
+        assert!(t.len() < 5_000);
+    }
+
+    #[test]
+    fn transcript_caps_total_size() {
+        let turns: Vec<ChatMessage> = (0..20)
+            .map(|i| ChatMessage::user(format!("{i}-{}", "y".repeat(3_000))))
+            .collect();
+        let t = compact_transcript(&turns);
+        assert!(t.contains("…[transcript truncated]"));
+        assert!(t.len() < COMPACT_MAX_TRANSCRIPT_CHARS + COMPACT_MAX_MSG_CHARS + 100);
+    }
+
+    #[test]
+    fn transcript_handles_multibyte_truncation() {
+        // char-based truncation must not split a multi-byte char
+        let turns = vec![ChatMessage::user("é".repeat(5_000))];
+        let t = compact_transcript(&turns);
+        assert!(t.contains("…[truncated]"));
+    }
+
+    #[test]
+    fn note_with_summary_embeds_it() {
+        let n = compact_note(3, Some("- did things in src/lib.rs"));
+        assert!(n.contains("Summary of 3 earlier compacted turn(s)"));
+        assert!(n.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn note_without_summary_is_plain_breadcrumb() {
+        let n = compact_note(5, None);
+        assert!(n.contains("5 earlier turn(s) were compacted"));
+        assert!(n.contains("read_file"));
+    }
 }

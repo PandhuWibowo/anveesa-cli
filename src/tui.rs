@@ -63,6 +63,15 @@ pub enum TuiEvent {
     PlanSet(Vec<String>),
     PlanTaskDone(usize),
     SetInput(String),
+    /// Background context compaction finished — splice the summary into history.
+    CompactDone {
+        drop_msgs: usize,
+        /// Content of history[0] when the snapshot was taken — guards against
+        /// /clear, /undo, or another compaction racing the summarizer.
+        first_msg: String,
+        /// None when summarization failed; fall back to a plain context note.
+        summary: Option<String>,
+    },
 }
 
 // ── Display message types ─────────────────────────────────────────────────────
@@ -144,6 +153,8 @@ struct StreamState {
     streaming_started_at: Option<Instant>,
     unread_count: usize,
     thinking_buf: String,
+    /// A background compaction summary is being generated.
+    compact_in_flight: bool,
 }
 
 pub(crate) struct ConvState {
@@ -290,6 +301,7 @@ impl App {
                 streaming_started_at: None,
                 unread_count: 0,
                 thinking_buf: String::new(),
+                compact_in_flight: false,
             },
 
             conv: ConvState {
