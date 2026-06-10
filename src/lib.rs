@@ -11,6 +11,34 @@ pub mod tui;
 pub mod web;
 pub mod workspace;
 
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod config_tests;
+
+#[cfg(test)]
+#[path = "mcp_tests.rs"]
+mod mcp_tests;
+
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod workspace_tests;
+
+#[cfg(test)]
+#[path = "image_tests.rs"]
+mod image_tests;
+
+#[cfg(test)]
+#[path = "prompt_tests.rs"]
+mod prompt_tests;
+
+#[cfg(test)]
+#[path = "provider_mod_tests.rs"]
+mod provider_mod_tests;
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
+
 use std::{
     fs,
     io::{self, IsTerminal},

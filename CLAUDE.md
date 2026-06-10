@@ -4,7 +4,7 @@
 
 A multi-provider terminal AI assistant written in Rust (edition 2024). Ships a full TUI, a browser web UI, and a one-shot CLI mode. Every AI provider that speaks the OpenAI chat/completions API works out of the box.
 
-**Version:** 0.7.5 | **Tests:** 246 passing (237 unit + 9 doc) | **Warnings:** 0
+**Version:** 0.7.5 | **Tests:** 246 passing (237 unit + 9 doc) + 55 provider edge-case tests | **Warnings:** 0
 
 ## Module map
 
@@ -28,6 +28,7 @@ src/
   provider/
     mod.rs            — StreamEvent, TurnResult, PromptRequest, Usage, ChatMessage
     openai_compatible.rs — SSE streaming, tool dispatch, retry, extended thinking
+    openai_compatible_tests.rs — Edge-case provider tests (55 tests: SSE parsing, truncation, unicode)
     command.rs        — shell-command provider (wraps claude/codex/copilot CLIs)
 
   tui/                — ratatui TUI (declared as mod inside tui.rs)
@@ -48,7 +49,7 @@ src/
 | `app.kbd` | `InputState` | input string, cursor, history, pending images, tab state |
 | `app.live` | `StreamState` | streaming buffer, pending tool, thinking buf, tool status |
 | `app.conv` | `ConvState` | history, session path, seen paths, undo stack |
-| `app.view` | `ViewState` | messages, scroll, search, msg_line_offsets, render_cache |
+| `app.view` | `ViewState` | messages, scroll, search, msg_line_offsets, render_cache, last_tool_render |
 
 Top-level App keeps: `mode`, `confirm`, `provider`, `model`, `usage`, `config`, `options`, `policy`, channels.
 

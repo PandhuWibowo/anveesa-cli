@@ -202,6 +202,49 @@ fn expand_arg(value: &str, prompt: &str, request: &PromptRequest) -> String {
         .replace("{system}", request.system.as_deref().unwrap_or_default())
 }
 
+fn resolve_command(command: &str) -> Result<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 {
+        return Ok(command_path.to_path_buf());
+    }
+
+    let Some(current_name) = env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(OsString::from))
+    else {
+        return Ok(command_path.to_path_buf());
+    };
+
+    let command_name = OsString::from(command);
+    if current_name != command_name {
+        return Ok(command_path.to_path_buf());
+    }
+
+    let current_exe = env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok());
+
+    for dir in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
+        let candidate = dir.join(command);
+        if !candidate.is_file() {
+            continue;
+        }
+
+        let canonical_candidate = candidate.canonicalize().ok();
+        if current_exe.is_some() && canonical_candidate == current_exe {
+            continue;
+        }
+
+        return Ok(candidate);
+    }
+
+    bail!(
+        "command provider '{}' resolves to this Anveesa alias; set providers.{}.command to the real executable path",
+        command,
+        command
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,47 +307,4 @@ mod tests {
         let args = build_args(&config(), "hi", &req);
         assert_eq!(args, vec!["exec", "--model", "gpt-5.1-codex", "hi"]);
     }
-}
-
-fn resolve_command(command: &str) -> Result<PathBuf> {
-    let command_path = Path::new(command);
-    if command_path.components().count() > 1 {
-        return Ok(command_path.to_path_buf());
-    }
-
-    let Some(current_name) = env::current_exe()
-        .ok()
-        .and_then(|path| path.file_name().map(OsString::from))
-    else {
-        return Ok(command_path.to_path_buf());
-    };
-
-    let command_name = OsString::from(command);
-    if current_name != command_name {
-        return Ok(command_path.to_path_buf());
-    }
-
-    let current_exe = env::current_exe()
-        .ok()
-        .and_then(|path| path.canonicalize().ok());
-
-    for dir in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
-        let candidate = dir.join(command);
-        if !candidate.is_file() {
-            continue;
-        }
-
-        let canonical_candidate = candidate.canonicalize().ok();
-        if current_exe.is_some() && canonical_candidate == current_exe {
-            continue;
-        }
-
-        return Ok(candidate);
-    }
-
-    bail!(
-        "command provider '{}' resolves to this Anveesa alias; set providers.{}.command to the real executable path",
-        command,
-        command
-    )
 }

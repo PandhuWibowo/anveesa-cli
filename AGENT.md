@@ -6,7 +6,7 @@ This file tells an AI coding agent everything it needs to work on this codebase 
 
 **anveesa** is a Rust CLI (edition 2024) that wraps any OpenAI-compatible AI provider into a unified terminal interface. It has three modes: a full-screen TUI (ratatui), a plain REPL, and a one-shot `anveesa "prompt"` mode. A browser chat UI is available via `anveesa web`.
 
-**Version:** 0.7.5 | **Tests:** 246 passing (237 unit + 9 doc) | **Warnings:** 0
+**Version:** 0.7.5 | **Tests:** 246 passing (237 unit + 9 doc) + 55 provider edge-case tests | **Warnings:** 0
 
 ## Repository layout
 
@@ -30,6 +30,7 @@ anveesa-cli/
 │   ├── provider/
 │   │   ├── mod.rs          # Shared types: StreamEvent, TurnResult, etc.
 │   │   ├── openai_compatible.rs  # Main provider: SSE streaming, tools, retry
+│   │   ├── openai_compatible_tests.rs  # Edge-case provider tests (55 tests)
 │   │   └── command.rs      # Shell-command provider wrapper
 │   └── tui/
 │       ├── commands.rs     # /add /diff /commit /memory and other slash cmds
@@ -77,7 +78,7 @@ cargo test
 | `InputState` | `app.kbd` | `input`, `input_cursor`, `input_history`, `hist_idx`, `hist_saved`, `pending_images`, `last_image_fp`, `tab_state` |
 | `StreamState` | `app.live` | `streaming_buf`, `accumulated_response`, `pending_tool`, `tool_status`, `plan_tasks`, `plan_done`, `pending_prompt`, `streaming_started_at`, `tool_started_at`, `unread_count`, `thinking_buf` |
 | `ConvState` | `app.conv` | `history`, `session_path`, `last_saved_at`, `seen_paths`, `undo_stack` |
-| `ViewState` | `app.view` | `messages`, `scroll`, `auto_scroll`, `total_lines`, `msg_focus`, `msg_line_offsets`, `search_query`, `search_results`, `search_idx`, `search_scroll_saved`, `mouse_capture`, `render_cache`, `render_cache_streaming_len` |
+| `ViewState` | `app.view` | `messages`, `scroll`, `auto_scroll`, `total_lines`, `msg_focus`, `msg_line_offsets`, `search_query`, `search_results`, `search_idx`, `search_scroll_saved`, `mouse_capture`, `render_cache`, `render_cache_streaming_len`, `last_tool_render` |
 
 Top-level `App` keeps: `mode`, `confirm`, `provider`, `model`, `last_model_used`, `usage`, `session_cost_usd`, `cwd`, `images_available`, `config`, `options`, `workspace_context`, `policy`, `mcp`, channels, `quit`, `spinner_frame`.
 

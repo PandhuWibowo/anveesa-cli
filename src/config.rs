@@ -388,7 +388,7 @@ impl AppConfig {
         Ok(config)
     }
 
-    fn merge_user(&mut self, user_config: AppConfig) {
+    pub(crate) fn merge_user(&mut self, user_config: AppConfig) {
         if user_config.default_provider.is_some() {
             self.default_provider = user_config.default_provider;
         }

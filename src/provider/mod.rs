@@ -152,13 +152,13 @@ pub enum StreamEvent {
     PlanTaskDone { index: usize },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffKind {
     Add,
     Remove,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DiffLine {
     pub kind: DiffKind,
     pub line_no: usize,
