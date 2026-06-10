@@ -54,12 +54,15 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                  /notes          list saved notes\n\
                  /clear        reset conversation\n\
                  /undo         restore last file changed by AI\n\
+                 /retry        re-send your last prompt\n\
+                 /init         generate .anveesa.md for this repo\n\
                  /compact      summarize old turns to free context\n\
                  /copy         copy last response to clipboard\n\
                  /export [path] save conversation as markdown\n\
                  /model [name] · /provider [name] · /status · /exit\n\
                  \n\
                  Keys: ↑/↓ history  ←/→ cursor  Shift+Enter newline\n\
+                 Esc/Ctrl+C  cancel a streaming response\n\
                  Tab     complete /command, /provider, or file path\n\
                  Ctrl+R  search  [ ] expand/collapse diffs\n\
                  j/k scroll  PageUp/Dn scroll\n\
@@ -147,6 +150,43 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                     }
                 }
             }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+        "/retry" => {
+            // Re-send the most recent user prompt (e.g. after an error,
+            // a cancel, or a weak answer).
+            let last = app
+                .conv
+                .history
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::provider::ChatRole::User)
+                .map(|m| m.content.clone())
+                .or_else(|| app.live.pending_prompt.clone().into())
+                .filter(|s| !s.trim().is_empty() && !s.starts_with('['));
+            match last {
+                Some(prompt) => app.kbd.queued_submit = Some(prompt),
+                None => app
+                    .view
+                    .messages
+                    .push(Msg::System("Nothing to retry yet.".into())),
+            }
+            app.kbd.input.clear();
+            app.kbd.input_cursor = 0;
+            true
+        }
+        "/init" => {
+            app.kbd.queued_submit = Some(
+                "Analyze this repository and write a `.anveesa.md` project instructions file \
+                 in the repo root (use the write_file tool). Include: a one-paragraph \
+                 description of what the project is, the module/directory layout, build and \
+                 test commands, code style conventions you can infer, and any gotchas worth \
+                 knowing. Keep it under 60 lines. If `.anveesa.md` already exists, read it \
+                 first and improve it rather than starting over."
+                    .to_string(),
+            );
             app.kbd.input.clear();
             app.kbd.input_cursor = 0;
             true
@@ -911,8 +951,10 @@ pub(super) fn handle_slash_command(app: &mut App, text: &str) -> bool {
                 if expanded.starts_with('/') {
                     handle_slash_command(app, &expanded)
                 } else {
-                    app.kbd.input = expanded;
-                    app.kbd.input_cursor = app.kbd.input.len();
+                    // Execute immediately — the Enter handler picks this up.
+                    app.kbd.queued_submit = Some(expanded);
+                    app.kbd.input.clear();
+                    app.kbd.input_cursor = 0;
                     true
                 }
             } else {

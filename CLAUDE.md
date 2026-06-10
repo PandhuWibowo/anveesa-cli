@@ -128,4 +128,6 @@ Users can create `~ ~/.anveesa/commands/*.md` files. Each file is auto-discovere
 
 ## TUI Slash Commands
 
-`/add <file>`, `/diff`, `/commit [msg]`, `/memory <note>`, `/compact`, `/undo`, `/copy`, `/export`, `/export text`, `/model`, `/provider`, `/status`, `/search`, `/clear`, `/help`, `/exit`, `/plan`
+`/add <file>`, `/diff`, `/commit [msg]`, `/memory <note>`, `/compact`, `/undo`, `/retry`, `/init`, `/copy`, `/export`, `/export text`, `/model`, `/provider`, `/status`, `/search`, `/clear`, `/help`, `/exit`, `/plan`
+
+Esc / Ctrl+C cancels a streaming response (partial output stays visible, not saved to history).
