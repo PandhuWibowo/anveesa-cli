@@ -3,14 +3,16 @@
 use crate::workspace::{directory_entries, git_output, workspace_context_for};
 use std::path::PathBuf;
 
+/// The crate root — works on any machine and on CI, unlike a hardcoded path.
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
 // ── git_output ───────────────────────────────────────────────────────
 
 #[test]
 fn git_output_version() {
-    let out = git_output::<1>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-        ["--version"],
-    );
+    let out = git_output::<1>(repo_root().as_path(), ["--version"]);
     assert!(out.is_some(), "git should be installed");
     assert!(out.as_ref().unwrap().contains("git version"));
 }
@@ -41,20 +43,14 @@ fn git_output_empty_args() {
 
 #[test]
 fn git_output_show_toplevel_in_git_repo() {
-    let out = git_output::<2>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-        ["rev-parse", "--show-toplevel"],
-    );
+    let out = git_output::<2>(repo_root().as_path(), ["rev-parse", "--show-toplevel"]);
     assert!(out.is_some(), "should find git root");
     assert!(out.as_ref().unwrap().ends_with("anveesa-cli"));
 }
 
 #[test]
 fn git_output_branch_show_current() {
-    let out = git_output::<2>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-        ["branch", "--show-current"],
-    );
+    let out = git_output::<2>(repo_root().as_path(), ["branch", "--show-current"]);
     // May be Some or None depending on detached HEAD
     let _ = out;
 }
@@ -149,10 +145,7 @@ fn workspace_context_has_header() {
 
 #[test]
 fn workspace_context_in_git_repo() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     assert!(ctx.contains("git_root:"));
     assert!(ctx.contains("git_branch:"));
     assert!(ctx.contains("git_status:"));
@@ -160,38 +153,26 @@ fn workspace_context_in_git_repo() {
 
 #[test]
 fn workspace_context_has_anveesa_md() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     assert!(ctx.contains("Project instructions"));
 }
 
 #[test]
 fn workspace_context_has_readme() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     assert!(ctx.contains("Project README"));
 }
 
 #[test]
 fn workspace_context_has_repo_files() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     assert!(ctx.contains("repo_files:"));
     assert!(ctx.contains(".rs"));
 }
 
 #[test]
 fn workspace_context_has_directory_entries() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     assert!(ctx.contains("directory_entries:"));
 }
 
@@ -205,19 +186,13 @@ fn workspace_context_non_git_dir() {
 fn workspace_context_cargo_toml() {
     // project has package.json so that branch runs first — cargo_toml only runs as fallback
     // Verify package.json metadata IS present
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     assert!(ctx.contains("project_name:") || ctx.contains("project_version:"));
 }
 
 #[test]
 fn workspace_context_package_json() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     // Has both Cargo.toml and package.json
     assert!(ctx.contains("cargo_") || ctx.contains("project_name:"));
 }
@@ -227,7 +202,7 @@ fn workspace_context_package_json() {
 #[test]
 fn git_output_multiple_args() {
     let out = git_output::<4>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
+        repo_root().as_path(),
         ["log", "--oneline", "-1", "--format=%H"],
     );
     assert!(out.is_some());
@@ -266,10 +241,7 @@ fn directory_entries_all_have_kind() {
 
 #[test]
 fn workspace_context_readme_capped() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     // Find the README section and verify it exists
     if let Some(start) = ctx.find("Project README") {
         let section = &ctx[start..];
@@ -285,10 +257,7 @@ fn workspace_context_readme_capped() {
 
 #[test]
 fn workspace_context_recent_commits() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().as_path()).unwrap();
     assert!(ctx.contains("recent_commits:"));
 }
 
@@ -311,10 +280,7 @@ fn workspace_context_is_string() {
 
 #[test]
 fn git_output_returns_trimmed() {
-    let out = git_output::<2>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-        ["rev-parse", "--show-toplevel"],
-    );
+    let out = git_output::<2>(repo_root().as_path(), ["rev-parse", "--show-toplevel"]);
     assert!(out.is_some());
     let s = out.unwrap();
     assert_eq!(s.trim(), s); // should already be trimmed
@@ -324,10 +290,7 @@ fn git_output_returns_trimmed() {
 
 #[test]
 fn workspace_context_for_src_dir() {
-    let ctx = workspace_context_for(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli/src").as_path(),
-    )
-    .unwrap();
+    let ctx = workspace_context_for(repo_root().join("src").as_path()).unwrap();
     assert!(ctx.contains("cwd:"));
     assert!(ctx.contains("/src"));
 }
@@ -365,10 +328,7 @@ fn directory_entries_dots_first() {
 #[test]
 fn git_output_stderr_not_in_output() {
     // stderr should not leak into stdout
-    let out = git_output::<1>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-        ["--version"],
-    );
+    let out = git_output::<1>(repo_root().as_path(), ["--version"]);
     let s = out.unwrap();
     // git --version only prints to stdout, no stderr
     assert!(!s.contains("error:"));
@@ -393,10 +353,7 @@ fn workspace_context_unicode_cwd() {
 
 #[test]
 fn git_output_rev_parse_short() {
-    let out = git_output::<2>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-        ["rev-parse", "HEAD"],
-    );
+    let out = git_output::<2>(repo_root().as_path(), ["rev-parse", "HEAD"]);
     assert!(out.is_some());
     let hash = out.unwrap();
     assert_eq!(hash.len(), 40);
@@ -404,10 +361,7 @@ fn git_output_rev_parse_short() {
 
 #[test]
 fn git_output_ls_files() {
-    let out = git_output::<2>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-        ["ls-files", "--cached"],
-    );
+    let out = git_output::<2>(repo_root().as_path(), ["ls-files", "--cached"]);
     assert!(out.is_some());
     let files = out.unwrap();
     assert!(files.contains(".rs") || files.contains("Cargo.toml"));
@@ -416,7 +370,7 @@ fn git_output_ls_files() {
 #[test]
 fn git_output_log_oneline() {
     let out = git_output::<4>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
+        repo_root().as_path(),
         ["log", "--oneline", "--decorate", "-3"],
     );
     assert!(out.is_some());
@@ -429,9 +383,7 @@ fn git_output_log_oneline() {
 
 #[test]
 fn directory_entries_src_dir() {
-    let entries = directory_entries(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli/src").as_path(),
-    );
+    let entries = directory_entries(repo_root().join("src").as_path());
     assert!(entries.is_ok());
     let list = entries.unwrap();
     assert!(!list.is_empty());
@@ -442,8 +394,7 @@ fn directory_entries_src_dir() {
 
 #[test]
 fn directory_entries_parent_dir() {
-    let entries =
-        directory_entries(PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa").as_path());
+    let entries = directory_entries(repo_root().parent().unwrap());
     assert!(entries.is_ok());
     let list = entries.unwrap();
     let has_dir = list.iter().any(|e| e.contains("/ (dir)"));
@@ -455,7 +406,7 @@ fn directory_entries_parent_dir() {
 #[test]
 fn workspace_context_is_deterministic() {
     // Running twice should give same result (git state doesn't change)
-    let path = PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli");
+    let path = repo_root();
     let ctx1 = workspace_context_for(path.as_path()).unwrap();
     let ctx2 = workspace_context_for(path.as_path()).unwrap();
     assert_eq!(ctx1, ctx2);
@@ -476,10 +427,7 @@ fn workspace_context_has_no_binary_garbage() {
 
 #[test]
 fn git_output_show_short_in_clean_repo() {
-    let out = git_output::<2>(
-        PathBuf::from("/Users/pandhuwibowo/Portfolio/anveesa/anveesa-cli").as_path(),
-        ["status", "--short"],
-    );
+    let out = git_output::<2>(repo_root().as_path(), ["status", "--short"]);
     // May be empty or have some changes
     let _ = out;
 }
