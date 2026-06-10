@@ -687,4 +687,328 @@ mod tests {
         assert!(n.contains("5 earlier turn(s) were compacted"));
         assert!(n.contains("read_file"));
     }
+
+    // ── handle_stream_event state-machine tests ──────────────────────────
+    //
+    // These drive the TUI event handler with synthetic event sequences —
+    // out-of-order tool completion, errors mid-stream, cancellation, racing
+    // compaction — the exact paths where the v0.7.6 freeze bugs lived.
+
+    use crate::cli::AskOptions;
+    use crate::config::AppConfig;
+    use crate::provider::{ApprovalPolicy, Usage};
+
+    fn test_app() -> App {
+        let (_key_tx, key_rx) = mpsc::unbounded_channel();
+        App::new(
+            "test".into(),
+            "test-model".into(),
+            "/tmp".into(),
+            vec![],
+            false,
+            None,
+            0,
+            vec![],
+            AppConfig::built_in(),
+            AskOptions::default(),
+            None,
+            ApprovalPolicy::Prompt,
+            key_rx,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn token_events_accumulate_in_streaming_buf() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+        handle_stream_event(&mut app, TuiEvent::Token("hel".into())).await;
+        handle_stream_event(&mut app, TuiEvent::Token("lo".into())).await;
+        assert_eq!(app.live.streaming_buf, "hello");
+        assert!(app.live.streaming_started_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn concurrent_tools_finish_out_of_order() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+        handle_stream_event(&mut app, TuiEvent::ToolCall("read file a".into())).await;
+        handle_stream_event(&mut app, TuiEvent::ToolCall("read file b".into())).await;
+        assert_eq!(app.live.pending_tools.len(), 2);
+
+        // b finishes before a — must remove the matching entry, not the last
+        handle_stream_event(
+            &mut app,
+            TuiEvent::ToolDone {
+                summary: "read file b".into(),
+                ok: true,
+                elapsed_ms: 7,
+            },
+        )
+        .await;
+        assert_eq!(app.live.pending_tools.len(), 1);
+        assert_eq!(app.live.pending_tools[0].summary, "read file a");
+
+        // exactly one committed done-line, with the provider-reported elapsed
+        let done: Vec<&Msg> = app
+            .view
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Msg::Tool { .. }))
+            .collect();
+        assert_eq!(done.len(), 1);
+        match done[0] {
+            Msg::Tool {
+                ok,
+                text,
+                elapsed_ms,
+                ..
+            } => {
+                assert!(*ok);
+                assert_eq!(text, "read file b");
+                assert_eq!(*elapsed_ms, Some(7));
+            }
+            _ => unreachable!(),
+        }
+
+        handle_stream_event(
+            &mut app,
+            TuiEvent::ToolDone {
+                summary: "read file a".into(),
+                ok: false,
+                elapsed_ms: 3,
+            },
+        )
+        .await;
+        assert!(app.live.pending_tools.is_empty());
+        assert_eq!(app.live.tool_status, "Thinking");
+    }
+
+    #[tokio::test]
+    async fn error_mid_stream_commits_pending_tools_as_failed() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+        handle_stream_event(&mut app, TuiEvent::ToolCall("run command x".into())).await;
+        handle_stream_event(&mut app, TuiEvent::Error("boom".into())).await;
+        assert!(app.live.pending_tools.is_empty());
+        assert_eq!(app.mode, Mode::Input);
+        assert!(
+            app.view
+                .messages
+                .iter()
+                .any(|m| matches!(m, Msg::Tool { ok: false, .. }))
+        );
+        assert!(
+            app.view
+                .messages
+                .iter()
+                .any(|m| matches!(m, Msg::Error(e) if e == "boom"))
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_finishes_turn_and_saves_history() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+        app.live.pending_prompt = "question".into();
+        handle_stream_event(&mut app, TuiEvent::Token("answer".into())).await;
+        handle_stream_event(&mut app, TuiEvent::Usage(Usage::default())).await;
+        assert_eq!(app.mode, Mode::Input);
+        assert_eq!(app.conv.history.len(), 2);
+        assert_eq!(app.conv.history[0].content, "question");
+        assert_eq!(app.conv.history[1].content, "answer");
+        assert!(app.live.streaming_buf.is_empty());
+        assert!(app.view.auto_scroll);
+    }
+
+    #[tokio::test]
+    async fn cancel_turn_aborts_task_and_resets_state() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+        app.live.streaming_buf = "partial".into();
+        app.live.pending_tools.push(PendingTool {
+            summary: "web search q".into(),
+            started_at: Instant::now(),
+        });
+        let task = tokio::spawn(async { tokio::time::sleep(Duration::from_secs(60)).await });
+        app.live.turn_abort = Some(task.abort_handle());
+
+        cancel_turn(&mut app);
+
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(app.mode, Mode::Input);
+        assert!(app.live.turn_abort.is_none());
+        assert!(app.live.pending_tools.is_empty());
+        // partial output stays visible but is not saved to history
+        assert!(
+            app.view
+                .messages
+                .iter()
+                .any(|m| matches!(m, Msg::Assistant { text } if text == "partial"))
+        );
+        assert!(app.conv.history.is_empty());
+        assert!(
+            app.view
+                .messages
+                .iter()
+                .any(|m| matches!(m, Msg::System(s) if s.starts_with("Cancelled")))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_without_active_turn_is_noop() {
+        let mut app = test_app();
+        cancel_turn(&mut app);
+        assert!(app.view.messages.is_empty());
+        assert_eq!(app.mode, Mode::Input);
+    }
+
+    #[tokio::test]
+    async fn stray_events_after_cancel_are_dropped() {
+        let mut app = test_app(); // mode == Input, no turn in flight
+        handle_stream_event(&mut app, TuiEvent::Token("zombie".into())).await;
+        handle_stream_event(&mut app, TuiEvent::ToolCall("read file x".into())).await;
+        handle_stream_event(&mut app, TuiEvent::Status("working".into())).await;
+        assert!(app.live.streaming_buf.is_empty());
+        assert!(app.live.pending_tools.is_empty());
+        assert!(app.live.tool_status.is_empty());
+
+        // ...but events describing real effects are still recorded
+        handle_stream_event(
+            &mut app,
+            TuiEvent::ToolDone {
+                summary: "read file x".into(),
+                ok: true,
+                elapsed_ms: 1,
+            },
+        )
+        .await;
+        assert!(
+            app.view
+                .messages
+                .iter()
+                .any(|m| matches!(m, Msg::Tool { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_flushes_to_collapsed_block_on_first_token() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+        handle_stream_event(&mut app, TuiEvent::Thinking("hmm".into())).await;
+        assert_eq!(app.live.thinking_buf, "hmm");
+        handle_stream_event(&mut app, TuiEvent::Token("answer".into())).await;
+        assert!(app.live.thinking_buf.is_empty());
+        assert!(app.view.messages.iter().any(|m| matches!(
+            m,
+            Msg::Thinking {
+                collapsed: true,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn compact_done_splices_summary_into_history() {
+        let mut app = test_app();
+        for i in 0..4 {
+            app.conv.history.push(ChatMessage::user(format!("q{i}")));
+            app.conv
+                .history
+                .push(ChatMessage::assistant(format!("a{i}")));
+        }
+        app.live.compact_in_flight = true;
+        handle_stream_event(
+            &mut app,
+            TuiEvent::CompactDone {
+                drop_msgs: 4,
+                first_msg: "q0".into(),
+                summary: Some("- did things".into()),
+            },
+        )
+        .await;
+        assert!(!app.live.compact_in_flight);
+        assert_eq!(app.conv.history.len(), 5); // 8 - 4 dropped + 1 summary
+        assert!(app.conv.history[0].content.contains("- did things"));
+        assert_eq!(app.conv.history[1].content, "q2");
+    }
+
+    #[tokio::test]
+    async fn compact_done_skips_when_history_changed() {
+        let mut app = test_app();
+        // history no longer starts with the snapshot the summarizer saw
+        app.conv.history.push(ChatMessage::user("different".into()));
+        app.conv.history.push(ChatMessage::assistant("a".into()));
+        app.live.compact_in_flight = true;
+        handle_stream_event(
+            &mut app,
+            TuiEvent::CompactDone {
+                drop_msgs: 2,
+                first_msg: "q0".into(),
+                summary: Some("s".into()),
+            },
+        )
+        .await;
+        assert!(!app.live.compact_in_flight);
+        assert_eq!(app.conv.history.len(), 2); // untouched
+        assert_eq!(app.conv.history[0].content, "different");
+    }
+
+    #[tokio::test]
+    async fn fileop_records_correct_undo_snapshot() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+
+        // Update with pre-run content → undo restores it
+        handle_stream_event(
+            &mut app,
+            TuiEvent::FileOp {
+                verb: "Update".into(),
+                path: "/tmp/x.rs".into(),
+                added: 1,
+                removed: 1,
+                diff: vec![],
+                old_content: Some("before".into()),
+            },
+        )
+        .await;
+        assert_eq!(
+            app.conv.undo_stack.last(),
+            Some(&("/tmp/x.rs".to_string(), Some("before".to_string())))
+        );
+
+        // Create (no previous content) → undo deletes the new file
+        handle_stream_event(
+            &mut app,
+            TuiEvent::FileOp {
+                verb: "Create".into(),
+                path: "/tmp/new.rs".into(),
+                added: 3,
+                removed: 0,
+                diff: vec![],
+                old_content: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            app.conv.undo_stack.last(),
+            Some(&("/tmp/new.rs".to_string(), None))
+        );
+
+        // Update with no snapshot (file too large) → no undo entry at all
+        let depth = app.conv.undo_stack.len();
+        handle_stream_event(
+            &mut app,
+            TuiEvent::FileOp {
+                verb: "Update".into(),
+                path: "/tmp/big.bin".into(),
+                added: 1,
+                removed: 1,
+                diff: vec![],
+                old_content: None,
+            },
+        )
+        .await;
+        assert_eq!(app.conv.undo_stack.len(), depth);
+    }
 }
