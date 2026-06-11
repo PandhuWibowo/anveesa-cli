@@ -73,18 +73,22 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
         };
         let result =
             crate::provider::ask(&config, &provider_name, request, policy, &stream_tx_inner).await;
-        drop(stream_tx_inner);
         match result {
             Ok(turn) => {
                 if let Some(m) = turn.model_used {
                     let _ = tui_tx.send(TuiEvent::ModelUsed(m));
                 }
-                let _ = tui_tx.send(TuiEvent::Usage(turn.usage.unwrap_or_default()));
+                // Usage accounting arrives via the StreamEvent::Usage the
+                // provider already emits — sending it again here double-counted
+                // tokens/cost and ran finish_turn twice (double separators).
             }
             Err(e) => {
                 let _ = tui_tx.send(TuiEvent::Error(format!("{e:#}")));
             }
         }
+        // Drop AFTER the result is enqueued: the bridge emits TurnDone when
+        // this channel closes, so an Error always lands before TurnDone.
+        drop(stream_tx_inner);
     });
     app.live.turn_abort = Some(turn_task.abort_handle());
 
@@ -163,6 +167,9 @@ pub(super) async fn submit_prompt(app: &mut App, text: String) -> Result<()> {
                 break;
             }
         }
+        // Stream closed — every buffered event has been forwarded in order,
+        // so this is the one safe place to declare the turn finished.
+        let _ = tui_tx2.send(TuiEvent::TurnDone);
     });
 
     Ok(())
@@ -325,7 +332,14 @@ pub(super) async fn handle_stream_event(app: &mut App, ev: TuiEvent) {
                     + u.completion_tokens as f64 * out_price / 1_000_000.0
                     + u.cache_read_tokens as f64 * cr_price / 1_000_000.0
                     + u.cache_write_tokens as f64 * cw_price / 1_000_000.0;
-            finish_turn(app);
+            // Accounting only — TurnDone (sent once, after all stream events)
+            // is what finishes the turn.
+        }
+        TuiEvent::TurnDone => {
+            // No-op after an error or cancel already returned to input mode.
+            if app.mode != Mode::Input {
+                finish_turn(app);
+            }
         }
         TuiEvent::Error(msg) => {
             app.live.turn_abort = None;
@@ -805,18 +819,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_finishes_turn_and_saves_history() {
+    async fn turn_done_finishes_turn_and_saves_history() {
         let mut app = test_app();
         app.mode = Mode::Streaming;
         app.live.pending_prompt = "question".into();
         handle_stream_event(&mut app, TuiEvent::Token("answer".into())).await;
         handle_stream_event(&mut app, TuiEvent::Usage(Usage::default())).await;
+        // Usage alone must NOT finish the turn (it used to fire finish twice).
+        assert_eq!(app.mode, Mode::Streaming);
+        handle_stream_event(&mut app, TuiEvent::TurnDone).await;
         assert_eq!(app.mode, Mode::Input);
         assert_eq!(app.conv.history.len(), 2);
         assert_eq!(app.conv.history[0].content, "question");
         assert_eq!(app.conv.history[1].content, "answer");
         assert!(app.live.streaming_buf.is_empty());
         assert!(app.view.auto_scroll);
+        // Exactly one separator — the double-finish bug rendered two.
+        let separators = app
+            .view
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Msg::Separator))
+            .count();
+        assert_eq!(separators, 1);
+    }
+
+    #[tokio::test]
+    async fn turn_done_after_error_is_noop() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+        handle_stream_event(&mut app, TuiEvent::Error("boom".into())).await;
+        let msgs = app.view.messages.len();
+        handle_stream_event(&mut app, TuiEvent::TurnDone).await;
+        assert_eq!(app.view.messages.len(), msgs); // no separator, no history
+        assert!(app.conv.history.is_empty());
+        assert_eq!(app.mode, Mode::Input);
+    }
+
+    #[tokio::test]
+    async fn usage_accumulates_tokens_without_finishing() {
+        let mut app = test_app();
+        app.mode = Mode::Streaming;
+        let u = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            ..Default::default()
+        };
+        handle_stream_event(&mut app, TuiEvent::Usage(u)).await;
+        assert_eq!(app.usage.prompt_tokens, 100);
+        assert_eq!(app.usage.completion_tokens, 20);
+        assert_eq!(app.mode, Mode::Streaming);
     }
 
     #[tokio::test]

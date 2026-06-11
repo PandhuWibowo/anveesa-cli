@@ -26,6 +26,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How many times the model may call the exact same (tool, arguments) pair before we refuse.
 const MAX_IDENTICAL_CALLS: usize = 3;
 const MAX_TOOL_INTENT_REPROMPTS: usize = 2;
+/// How many times we nudge the model when it returns an EMPTY response
+/// mid-task (no text, no tool calls) — some models (Qwen under long context)
+/// do this, and treating it as the final answer kills the turn early.
+const MAX_EMPTY_RESPONSE_RETRIES: usize = 2;
 /// How many times we ask the model to continue after its output was cut off by the
 /// provider's token limit (`finish_reason == "length"`) before giving up.
 const MAX_LENGTH_CONTINUATIONS: usize = 8;
@@ -67,6 +71,7 @@ pub async fn ask(
     let mut full_text = String::new();
     let mut last_usage: Option<Usage> = None;
     let mut tool_intent_reprompts = 0usize;
+    let mut empty_response_retries = 0usize;
     let mut length_continuations = 0usize;
     // Multi-model routing: use fast_model when only read-only tools have run
     let mut any_write_tool_used = false;
@@ -182,6 +187,25 @@ pub async fn ask(
                     "content": state.content,
                 }));
                 messages.push(tool_intent_reprompt_message());
+                continue;
+            }
+
+            // An EMPTY response right after tool work is a model hiccup, not
+            // a final answer — ending the turn here abandons the task midway.
+            if state.content.trim().is_empty()
+                && tool_rounds > 0
+                && empty_response_retries < MAX_EMPTY_RESPONSE_RETRIES
+            {
+                empty_response_retries += 1;
+                let _ = events.send(StreamEvent::Status {
+                    message: "Model returned an empty response; asking it to continue".to_string(),
+                });
+                messages.push(json!({
+                    "role": "user",
+                    "content": "[system: Your previous response was empty. The task is not \
+                     finished. Continue now: call the next tool you need, or — if the work is \
+                     actually complete — summarize what was done and what (if anything) remains.]"
+                }));
                 continue;
             }
 

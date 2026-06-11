@@ -59,6 +59,10 @@ pub enum TuiEvent {
         reply: oneshot::Sender<ApprovalDecision>,
     },
     Usage(Usage),
+    /// The provider stream closed — the turn is over. Sent exactly once by
+    /// the bridge task AFTER all buffered stream events were forwarded, so
+    /// finish_turn can never race ahead of (or duplicate behind) Usage.
+    TurnDone,
     ModelUsed(String),
     SystemMsg(String),
     Error(String),
