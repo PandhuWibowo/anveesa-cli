@@ -4,7 +4,7 @@
 
 A multi-provider terminal AI assistant written in Rust (edition 2024). Ships a full TUI, a browser web UI, and a one-shot CLI mode. Every AI provider that speaks the OpenAI chat/completions API works out of the box.
 
-**Version:** 0.7.10 | **Tests:** 696 passing (687 unit + 9 doc) | **Warnings:** 0
+**Version:** 0.7.11 | **Tests:** 698 passing (689 unit + 9 doc) | **Warnings:** 0
 
 ## Module map
 
@@ -61,14 +61,14 @@ Top-level App keeps: `mode`, `confirm`, `provider`, `model`, `usage`, `config`, 
 - **cargo clippy --all-targets -- -D warnings** — CI runs this on Ubuntu (covers test code too). Test locally too.
 - **No new dependencies** without good reason — Cargo.toml is deliberately lean.
 - **Tests live in the same file** as the code they test (bottom `#[cfg(test)] mod tests`).
-- **696 tests** — `cargo test` must stay green.
+- **698 tests** — `cargo test` must stay green.
 
 ## Build & test
 
 ```bash
 cargo build          # dev build
 cargo build --release # production binary
-cargo test           # 696 tests
+cargo test           # 698 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -92,7 +92,7 @@ cargo fmt --check
 
 ## TuiEvent
 
-`TuiEvent` bridges the provider stream to the TUI event loop: `Token`, `Thinking`, `SystemMsg`, `ModelUsed`, `SetInput` (pre-fills input field), `Usage`, `Error`, `FileOp`, `Confirm`, `ToolCall`, `ToolDone`, `PlanSet`, `PlanTaskDone`.
+`TuiEvent` bridges the provider stream to the TUI event loop: `Token`, `Thinking`, `SystemMsg`, `ModelUsed`, `SetInput` (pre-fills input field), `Usage` (accounting only), `TurnDone` (finishes the turn — sent once by the bridge when the stream closes), `Error`, `FileOp`, `Confirm`, `ToolCall`, `ToolDone`, `PlanSet`, `PlanTaskDone`.
 
 ## Web server (web.rs)
 
